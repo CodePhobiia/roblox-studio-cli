@@ -51,22 +51,44 @@ local function applyTags(instance, tags, warnings)
     end
 end
 
-local function applyProperties(instance, props, idMap, warnings)
-    for prop, encoded in pairs(props or {}) do
-        if not SKIP_PROPS[prop] then
-            local decoded, decodeWarning = Encoders.decode(encoded, idMap)
-            if decodeWarning then
-                table.insert(warnings, instance:GetFullName() .. "." .. prop .. ": " .. decodeWarning)
-            end
-            if decoded ~= nil then
-                local ok, err = pcall(function()
-                    instance[prop] = decoded
-                end)
-                if not ok then
-                    table.insert(warnings, instance:GetFullName() .. "." .. prop .. ": " .. tostring(err))
-                end
-            end
+local function applyOneProperty(instance, prop, encoded, idMap, warnings)
+    if SKIP_PROPS[prop] then
+        return
+    end
+
+    local decoded, decodeWarning = Encoders.decode(encoded, idMap)
+    if decodeWarning then
+        table.insert(warnings, instance:GetFullName() .. "." .. prop .. ": " .. decodeWarning)
+    end
+    if decoded ~= nil then
+        local ok, err = pcall(function()
+            instance[prop] = decoded
+        end)
+        if not ok then
+            table.insert(warnings, instance:GetFullName() .. "." .. prop .. ": " .. tostring(err))
         end
+    end
+end
+
+local function applyProperties(instance, props, idMap, warnings)
+    props = props or {}
+    local applied = {}
+
+    for _, prop in ipairs({ "Name", "BrickColor" }) do
+        if props[prop] ~= nil then
+            applyOneProperty(instance, prop, props[prop], idMap, warnings)
+            applied[prop] = true
+        end
+    end
+
+    for prop, encoded in pairs(props) do
+        if not applied[prop] and prop ~= "Color" then
+            applyOneProperty(instance, prop, encoded, idMap, warnings)
+        end
+    end
+
+    if props.Color ~= nil then
+        applyOneProperty(instance, "Color", props.Color, idMap, warnings)
     end
 end
 

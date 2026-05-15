@@ -8,11 +8,33 @@ local function array(tag, ...)
     return result
 end
 
-function Encoders.encode(value, refs)
+function Encoders.encode(value, refs, seen)
     local valueType = typeof(value)
 
     if value == nil or valueType == "string" or valueType == "number" or valueType == "boolean" then
         return value
+    elseif valueType == "table" then
+        seen = seen or {}
+        if seen[value] then
+            return nil, "cyclic table"
+        end
+        seen[value] = true
+
+        local result = {}
+        for key, child in pairs(value) do
+            if type(key) == "string" or type(key) == "number" then
+                local encoded, warning = Encoders.encode(child, refs, seen)
+                if encoded ~= nil then
+                    result[key] = encoded
+                elseif warning and child ~= nil then
+                    seen[value] = nil
+                    return nil, warning
+                end
+            end
+        end
+
+        seen[value] = nil
+        return result
     elseif valueType == "Vector3" then
         return array("Vector3", value.X, value.Y, value.Z)
     elseif valueType == "Vector2" then
@@ -30,7 +52,11 @@ function Encoders.encode(value, refs)
     elseif valueType == "Rect" then
         return array("Rect", value.Min.X, value.Min.Y, value.Max.X, value.Max.Y)
     elseif valueType == "EnumItem" then
-        return array("Enum", value.EnumType.Name, value.Name)
+        local enumTypeName, enumItemName = string.match(tostring(value), "^Enum%.([^.]+)%.(.+)$")
+        if enumTypeName and enumItemName then
+            return array("Enum", enumTypeName, enumItemName)
+        end
+        return nil, "unsupported enum item: " .. tostring(value)
     elseif valueType == "ColorSequence" then
         local keypoints = {}
         for _, keypoint in ipairs(value.Keypoints) do

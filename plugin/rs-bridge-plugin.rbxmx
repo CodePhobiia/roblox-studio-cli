@@ -71,22 +71,44 @@ local function applyTags(instance, tags, warnings)
     end
 end
 
-local function applyProperties(instance, props, idMap, warnings)
-    for prop, encoded in pairs(props or {}) do
-        if not SKIP_PROPS[prop] then
-            local decoded, decodeWarning = Encoders.decode(encoded, idMap)
-            if decodeWarning then
-                table.insert(warnings, instance:GetFullName() .. "." .. prop .. ": " .. decodeWarning)
-            end
-            if decoded ~= nil then
-                local ok, err = pcall(function()
-                    instance[prop] = decoded
-                end)
-                if not ok then
-                    table.insert(warnings, instance:GetFullName() .. "." .. prop .. ": " .. tostring(err))
-                end
-            end
+local function applyOneProperty(instance, prop, encoded, idMap, warnings)
+    if SKIP_PROPS[prop] then
+        return
+    end
+
+    local decoded, decodeWarning = Encoders.decode(encoded, idMap)
+    if decodeWarning then
+        table.insert(warnings, instance:GetFullName() .. "." .. prop .. ": " .. decodeWarning)
+    end
+    if decoded ~= nil then
+        local ok, err = pcall(function()
+            instance[prop] = decoded
+        end)
+        if not ok then
+            table.insert(warnings, instance:GetFullName() .. "." .. prop .. ": " .. tostring(err))
         end
+    end
+end
+
+local function applyProperties(instance, props, idMap, warnings)
+    props = props or {}
+    local applied = {}
+
+    for _, prop in ipairs({ "Name", "BrickColor" }) do
+        if props[prop] ~= nil then
+            applyOneProperty(instance, prop, props[prop], idMap, warnings)
+            applied[prop] = true
+        end
+    end
+
+    for prop, encoded in pairs(props) do
+        if not applied[prop] and prop ~= "Color" then
+            applyOneProperty(instance, prop, encoded, idMap, warnings)
+        end
+    end
+
+    if props.Color ~= nil then
+        applyOneProperty(instance, "Color", props.Color, idMap, warnings)
     end
 end
 
@@ -471,6 +493,7 @@ Dispatch.register("deserialize", require(script.Parent.Handlers.Deserialize))
 
 local studioId = HttpService:GenerateGUID(false)
 local sessionToken = nil
+local registering = false
 local stopping = false
 
 local function getPlaceFilePath()
@@ -485,9 +508,12 @@ end
 
 local function unwrapEnvelope(response)
     if type(response) == "table" and response.ok == true then
-        return response.data
+        return response.data, nil
     end
-    return response
+    if type(response) == "table" and response.ok == false then
+        return nil, tostring(response.error or "bridge returned ok=false")
+    end
+    return response, nil
 end
 
 local function register()
@@ -501,7 +527,11 @@ local function register()
         return false
     end
 
-    local data = unwrapEnvelope(response)
+    local data, envelopeErr = unwrapEnvelope(response)
+    if envelopeErr then
+        warn("[rs-bridge-plugin] register rejected: " .. envelopeErr)
+        return false
+    end
     if type(data) == "table" and type(data.sessionToken) == "string" then
         sessionToken = data.sessionToken
         print("[rs-bridge-plugin] Registered as '" .. game.Name .. "'")
@@ -514,8 +544,15 @@ end
 
 local function ensureRegistered()
     while not stopping and not sessionToken do
-        if not register() then
-            task.wait(Config.registerRetrySeconds)
+        if registering then
+            task.wait(0.1)
+        else
+            registering = true
+            local ok = register()
+            registering = false
+            if not ok then
+                task.wait(Config.registerRetrySeconds)
+            end
         end
     end
 end
@@ -523,7 +560,11 @@ end
 local function heartbeatLoop()
     while not stopping do
         if sessionToken then
-            local _, err = Http.post(Config.bridgeUrl .. "/heartbeat/" .. sessionToken, {})
+            local response, err = Http.post(Config.bridgeUrl .. "/heartbeat/" .. sessionToken, {})
+            if not err then
+                local _, envelopeErr = unwrapEnvelope(response)
+                err = envelopeErr
+            end
             if err then
                 warn("[rs-bridge-plugin] heartbeat failed: " .. tostring(err))
                 sessionToken = nil
@@ -535,7 +576,11 @@ local function heartbeatLoop()
 end
 
 local function postResult(commandId, result)
-    local _, err = Http.post(Config.bridgeUrl .. "/result/" .. commandId, result)
+    local response, err = Http.post(Config.bridgeUrl .. "/result/" .. commandId, result)
+    if not err then
+        local _, envelopeErr = unwrapEnvelope(response)
+        err = envelopeErr
+    end
     if err then
         warn("[rs-bridge-plugin] result post failed: " .. tostring(err))
     end
@@ -549,7 +594,13 @@ local function pollLoop()
 
         local response, err = Http.get(Config.bridgeUrl .. "/poll/" .. sessionToken)
         if response then
-            local command = unwrapEnvelope(response)
+            local command, envelopeErr = unwrapEnvelope(response)
+            if envelopeErr then
+                warn("[rs-bridge-plugin] poll rejected: " .. tostring(envelopeErr))
+                sessionToken = nil
+                task.wait(Config.registerRetrySeconds)
+                continue
+            end
             if type(command) == "table" and command.commandId then
                 local result = Dispatch.run(command)
                 postResult(command.commandId, result)
@@ -565,7 +616,6 @@ local function pollLoop()
 end
 
 print("[rs-bridge-plugin] Loaded")
-task.spawn(ensureRegistered)
 task.spawn(heartbeatLoop)
 task.spawn(pollLoop)
 
@@ -733,11 +783,33 @@ local function array(tag, ...)
     return result
 end
 
-function Encoders.encode(value, refs)
+function Encoders.encode(value, refs, seen)
     local valueType = typeof(value)
 
     if value == nil or valueType == "string" or valueType == "number" or valueType == "boolean" then
         return value
+    elseif valueType == "table" then
+        seen = seen or {}
+        if seen[value] then
+            return nil, "cyclic table"
+        end
+        seen[value] = true
+
+        local result = {}
+        for key, child in pairs(value) do
+            if type(key) == "string" or type(key) == "number" then
+                local encoded, warning = Encoders.encode(child, refs, seen)
+                if encoded ~= nil then
+                    result[key] = encoded
+                elseif warning and child ~= nil then
+                    seen[value] = nil
+                    return nil, warning
+                end
+            end
+        end
+
+        seen[value] = nil
+        return result
     elseif valueType == "Vector3" then
         return array("Vector3", value.X, value.Y, value.Z)
     elseif valueType == "Vector2" then
@@ -755,7 +827,11 @@ function Encoders.encode(value, refs)
     elseif valueType == "Rect" then
         return array("Rect", value.Min.X, value.Min.Y, value.Max.X, value.Max.Y)
     elseif valueType == "EnumItem" then
-        return array("Enum", value.EnumType.Name, value.Name)
+        local enumTypeName, enumItemName = string.match(tostring(value), "^Enum%.([^.]+)%.(.+)$")
+        if enumTypeName and enumItemName then
+            return array("Enum", enumTypeName, enumItemName)
+        end
+        return nil, "unsupported enum item: " .. tostring(value)
     elseif valueType == "ColorSequence" then
         local keypoints = {}
         for _, keypoint in ipairs(value.Keypoints) do

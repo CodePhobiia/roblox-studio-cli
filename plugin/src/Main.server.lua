@@ -10,6 +10,7 @@ Dispatch.register("deserialize", require(script.Parent.Handlers.Deserialize))
 
 local studioId = HttpService:GenerateGUID(false)
 local sessionToken = nil
+local registering = false
 local stopping = false
 
 local function getPlaceFilePath()
@@ -24,9 +25,12 @@ end
 
 local function unwrapEnvelope(response)
     if type(response) == "table" and response.ok == true then
-        return response.data
+        return response.data, nil
     end
-    return response
+    if type(response) == "table" and response.ok == false then
+        return nil, tostring(response.error or "bridge returned ok=false")
+    end
+    return response, nil
 end
 
 local function register()
@@ -40,7 +44,11 @@ local function register()
         return false
     end
 
-    local data = unwrapEnvelope(response)
+    local data, envelopeErr = unwrapEnvelope(response)
+    if envelopeErr then
+        warn("[rs-bridge-plugin] register rejected: " .. envelopeErr)
+        return false
+    end
     if type(data) == "table" and type(data.sessionToken) == "string" then
         sessionToken = data.sessionToken
         print("[rs-bridge-plugin] Registered as '" .. game.Name .. "'")
@@ -53,8 +61,15 @@ end
 
 local function ensureRegistered()
     while not stopping and not sessionToken do
-        if not register() then
-            task.wait(Config.registerRetrySeconds)
+        if registering then
+            task.wait(0.1)
+        else
+            registering = true
+            local ok = register()
+            registering = false
+            if not ok then
+                task.wait(Config.registerRetrySeconds)
+            end
         end
     end
 end
@@ -62,7 +77,11 @@ end
 local function heartbeatLoop()
     while not stopping do
         if sessionToken then
-            local _, err = Http.post(Config.bridgeUrl .. "/heartbeat/" .. sessionToken, {})
+            local response, err = Http.post(Config.bridgeUrl .. "/heartbeat/" .. sessionToken, {})
+            if not err then
+                local _, envelopeErr = unwrapEnvelope(response)
+                err = envelopeErr
+            end
             if err then
                 warn("[rs-bridge-plugin] heartbeat failed: " .. tostring(err))
                 sessionToken = nil
@@ -74,7 +93,11 @@ local function heartbeatLoop()
 end
 
 local function postResult(commandId, result)
-    local _, err = Http.post(Config.bridgeUrl .. "/result/" .. commandId, result)
+    local response, err = Http.post(Config.bridgeUrl .. "/result/" .. commandId, result)
+    if not err then
+        local _, envelopeErr = unwrapEnvelope(response)
+        err = envelopeErr
+    end
     if err then
         warn("[rs-bridge-plugin] result post failed: " .. tostring(err))
     end
@@ -88,7 +111,13 @@ local function pollLoop()
 
         local response, err = Http.get(Config.bridgeUrl .. "/poll/" .. sessionToken)
         if response then
-            local command = unwrapEnvelope(response)
+            local command, envelopeErr = unwrapEnvelope(response)
+            if envelopeErr then
+                warn("[rs-bridge-plugin] poll rejected: " .. tostring(envelopeErr))
+                sessionToken = nil
+                task.wait(Config.registerRetrySeconds)
+                continue
+            end
             if type(command) == "table" and command.commandId then
                 local result = Dispatch.run(command)
                 postResult(command.commandId, result)
@@ -104,7 +133,6 @@ local function pollLoop()
 end
 
 print("[rs-bridge-plugin] Loaded")
-task.spawn(ensureRegistered)
 task.spawn(heartbeatLoop)
 task.spawn(pollLoop)
 
