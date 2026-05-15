@@ -49,3 +49,25 @@ fn export_response_roundtrips() {
     assert_eq!(back.files.len(), 1);
     assert_eq!(back.files[0].kind, "metadata");
 }
+
+#[test]
+fn import_asset_request_roundtrips() {
+    let req = ImportAssetRequest {
+        studio: Some("Snipe a Slime!".to_string()),
+        parent_path: "Workspace".to_string(),
+        name: "ImportedCube".to_string(),
+        meshes: vec![ImportMesh {
+            name: "Cube".to_string(),
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            triangles: vec![[1, 2, 3]],
+        }],
+        anchored: false,
+        weld: true,
+    };
+
+    let s = serde_json::to_string(&req).unwrap();
+    let back: ImportAssetRequest = serde_json::from_str(&s).unwrap();
+    assert_eq!(back.parent_path, "Workspace");
+    assert_eq!(back.meshes.len(), 1);
+    assert_eq!(back.meshes[0].triangles[0], [1, 2, 3]);
+}

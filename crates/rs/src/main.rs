@@ -85,6 +85,37 @@ enum Command {
         overwrite: bool,
     },
 
+    /// Import a local OBJ/STL/glTF/GLB mesh file into Studio as welded MeshParts.
+    ImportAsset {
+        /// Studio name, substring, or UUID. Optional if exactly one Studio is connected.
+        #[arg(long)]
+        studio: Option<String>,
+
+        /// Local .obj, .stl, .gltf, or .glb file to convert.
+        #[arg(long)]
+        file: std::path::PathBuf,
+
+        /// Dot path of the Studio parent to insert under.
+        #[arg(long, default_value = "Workspace")]
+        to: String,
+
+        /// Imported model name. Defaults to the local file stem.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Multiplier applied to imported vertex positions.
+        #[arg(long, default_value_t = 1.0)]
+        scale: f32,
+
+        /// Anchor generated MeshParts.
+        #[arg(long)]
+        anchored: bool,
+
+        /// Do not add WeldConstraints between generated MeshParts.
+        #[arg(long)]
+        no_weld: bool,
+    },
+
     /// Manage the local bridge daemon.
     Bridge {
         #[command(subcommand)]
@@ -134,6 +165,15 @@ fn run() -> AppResult<()> {
             depth,
             overwrite,
         } => cli::export::run(args.port, studio, path, out, depth, overwrite),
+        Command::ImportAsset {
+            studio,
+            file,
+            to,
+            name,
+            scale,
+            anchored,
+            no_weld,
+        } => cli::import_asset::run(args.port, studio, file, to, name, scale, anchored, !no_weld),
         Command::Bridge { command } => match command {
             BridgeCommand::Serve => {
                 let runtime = tokio::runtime::Builder::new_multi_thread()

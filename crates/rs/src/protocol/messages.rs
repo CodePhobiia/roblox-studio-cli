@@ -105,6 +105,38 @@ pub struct TransferRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ImportAssetRequest {
+    pub studio: Option<String>,
+    pub parent_path: String,
+    pub name: String,
+    pub meshes: Vec<ImportMesh>,
+    pub anchored: bool,
+    pub weld: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportMesh {
+    pub name: String,
+    pub vertices: Vec<[f32; 3]>,
+    pub triangles: Vec<[usize; 3]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportAssetResponse {
+    pub root_path: String,
+    pub mesh_count: usize,
+    pub part_count: usize,
+    pub weld_count: usize,
+    pub vertex_count: usize,
+    pub triangle_count: usize,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExportRequest {
     pub studio: Option<String>,
     pub path: String,

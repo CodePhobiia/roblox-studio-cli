@@ -2,8 +2,8 @@ use crate::bridge::orchestrator::run_transfer;
 use crate::bridge::registry::Registry;
 use crate::error::{AppError, AppResult};
 use crate::protocol::messages::{
-    CommandResult, Envelope, ExecRequest, ExportRequest, PluginCommand, ReadRequest,
-    RegisterRequest, RegisterResponse, TransferRequest,
+    CommandResult, Envelope, ExecRequest, ExportRequest, ImportAssetRequest, PluginCommand,
+    ReadRequest, RegisterRequest, RegisterResponse, TransferRequest,
 };
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
@@ -53,6 +53,7 @@ fn build_router(state: AppState) -> Router {
         .route("/exec", post(exec))
         .route("/read", post(read))
         .route("/export", post(export))
+        .route("/import-asset", post(import_asset))
         .route("/transfer", post(transfer))
         .route("/shutdown", post(shutdown))
         .with_state(state)
@@ -157,6 +158,30 @@ async fn export(
         "export",
         serde_json::json!({ "path": req.path, "depth": req.depth }),
         120,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn import_asset(
+    State(state): State<AppState>,
+    Json(req): Json<ImportAssetRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "importAsset",
+        serde_json::json!({
+            "parentPath": req.parent_path,
+            "name": req.name,
+            "meshes": req.meshes,
+            "anchored": req.anchored,
+            "weld": req.weld
+        }),
+        180,
     )
     .await
     {
