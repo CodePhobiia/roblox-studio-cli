@@ -1,4 +1,5 @@
 local CollectionService = game:GetService("CollectionService")
+local AssetService = game:GetService("AssetService")
 local Encoders = require(script.Parent.PropertyEncoders)
 
 local Deserializer = {}
@@ -16,7 +17,53 @@ local function destroyCreated(created)
     end
 end
 
-local function createInstance(className, warnings)
+local function decodeCollisionFidelity(encoded)
+    local decoded = nil
+    if encoded ~= nil then
+        local ok, result = pcall(function()
+            return Encoders.decode(encoded, {})
+        end)
+        if ok then
+            decoded = result
+        end
+    end
+    if typeof(decoded) == "EnumItem" and decoded.EnumType == Enum.CollisionFidelity then
+        return decoded
+    end
+    return Enum.CollisionFidelity.Default
+end
+
+local function createMeshPart(spec, warnings)
+    local props = spec.properties or {}
+    local meshId = props.MeshId
+    if type(meshId) == "string" and meshId ~= "" and Content and Content.fromUri then
+        local ok, meshPartOrErr = pcall(function()
+            return AssetService:CreateMeshPartAsync(Content.fromUri(meshId), {
+                CollisionFidelity = decodeCollisionFidelity(props.CollisionFidelity)
+            })
+        end)
+        if ok and meshPartOrErr then
+            return meshPartOrErr
+        end
+        table.insert(warnings, "could not create MeshPart from " .. meshId .. ": " .. tostring(meshPartOrErr))
+    end
+
+    local ok, fallback = pcall(function()
+        return Instance.new("MeshPart")
+    end)
+    if ok then
+        return fallback
+    end
+    table.insert(warnings, "could not create class 'MeshPart'; using Part")
+    return Instance.new("Part")
+end
+
+local function createInstance(spec, warnings)
+    local className = spec.className
+    if className == "MeshPart" then
+        return createMeshPart(spec, warnings)
+    end
+
     local ok, instance = pcall(function()
         return Instance.new(className)
     end)
@@ -53,6 +100,9 @@ end
 
 local function applyOneProperty(instance, prop, encoded, idMap, warnings)
     if SKIP_PROPS[prop] then
+        return
+    end
+    if instance:IsA("MeshPart") and (prop == "MeshId" or prop == "MeshContent") then
         return
     end
 
@@ -106,7 +156,7 @@ function Deserializer.deserialize(blob, parent)
             destroyCreated(created)
             return nil, "invalid instance spec for " .. tostring(id)
         end
-        local instance = createInstance(spec.className, warnings)
+        local instance = createInstance(spec, warnings)
         local name = spec.properties and spec.properties.Name
         if type(name) == "string" then
             pcall(function()
