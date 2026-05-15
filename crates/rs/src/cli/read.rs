@@ -24,11 +24,7 @@ pub fn run(port: u16, studio: Option<String>, path: String, depth: u32) -> AppRe
         })?;
     let env: Envelope<serde_json::Value> = resp.json()?;
     if !env.ok {
-        return Err(AppError::Other(format!(
-            "read failed: {} (code: {})",
-            env.error.unwrap_or_default(),
-            env.code.unwrap_or_default()
-        )));
+        return Err(crate::cli::envelope_error("read", env.error, env.code));
     }
     println!(
         "{}",

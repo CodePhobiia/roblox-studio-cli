@@ -19,11 +19,7 @@ pub fn run(port: u16, json: bool) -> AppResult<()> {
         })?;
     let env: Envelope<Vec<StudioInfo>> = resp.json()?;
     if !env.ok {
-        return Err(AppError::Other(format!(
-            "list failed: {} (code: {})",
-            env.error.unwrap_or_default(),
-            env.code.unwrap_or_default()
-        )));
+        return Err(crate::cli::envelope_error("list", env.error, env.code));
     }
     let studios = env.data.unwrap_or_default();
     if json {

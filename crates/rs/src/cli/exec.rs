@@ -20,11 +20,7 @@ pub fn run(port: u16, studio: Option<String>, lua: String) -> AppResult<()> {
         })?;
     let env: Envelope<serde_json::Value> = resp.json()?;
     if !env.ok {
-        return Err(AppError::Other(format!(
-            "exec failed: {} (code: {})",
-            env.error.unwrap_or_default(),
-            env.code.unwrap_or_default()
-        )));
+        return Err(crate::cli::envelope_error("exec", env.error, env.code));
     }
     print_json(env.data.unwrap_or_else(|| serde_json::json!(null)))?;
     Ok(())

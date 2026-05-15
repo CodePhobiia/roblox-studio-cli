@@ -28,11 +28,7 @@ pub fn run(port: u16, from: String, to: String) -> AppResult<()> {
         })?;
     let env: Envelope<serde_json::Value> = resp.json()?;
     if !env.ok {
-        return Err(AppError::Other(format!(
-            "transfer failed: {} (code: {})",
-            env.error.unwrap_or_default(),
-            env.code.unwrap_or_default()
-        )));
+        return Err(crate::cli::envelope_error("transfer", env.error, env.code));
     }
 
     let data = env.data.unwrap_or_else(|| serde_json::json!({}));

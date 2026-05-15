@@ -27,10 +27,11 @@ pub fn status(port: u16, json: bool) -> AppResult<()> {
     let studios_url = format!("http://127.0.0.1:{port}/studios");
     let env: Envelope<Vec<StudioInfo>> = client.get(&studios_url).send()?.json()?;
     if !env.ok {
-        return Err(AppError::Other(format!(
-            "bridge status failed: {}",
-            env.error.unwrap_or_else(|| "unknown error".into())
-        )));
+        return Err(crate::cli::envelope_error(
+            "bridge status",
+            env.error,
+            env.code,
+        ));
     }
     let studios = env.data.unwrap_or_default();
     if json {
