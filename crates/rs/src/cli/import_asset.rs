@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn run(
     port: u16,
@@ -103,10 +104,191 @@ fn load_mesh_file(path: &Path, scale: f32) -> AppResult<Vec<ImportMesh>> {
         "stl" => parse_stl(&fs::read(path)?, &file_stem(path), scale),
         "glb" => parse_glb(&fs::read(path)?, &file_stem(path), scale),
         "gltf" => parse_gltf(path, scale),
-        _ => Err(AppError::Other(format!(
-            "unsupported 3D asset format '.{ext}'. Supported formats: .obj, .stl, .gltf, .glb"
-        ))),
+        _ => parse_with_blender(path, scale).map_err(|err| {
+            AppError::Other(format!(
+                "unsupported native format '.{ext}', and Blender conversion failed: {err}"
+            ))
+        }),
     }
+}
+
+fn parse_with_blender(path: &Path, scale: f32) -> AppResult<Vec<ImportMesh>> {
+    if !path.exists() {
+        return Err(AppError::Other(format!(
+            "source file does not exist: {}",
+            path.display()
+        )));
+    }
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let work_dir =
+        std::env::temp_dir().join(format!("rs-import-asset-{}-{stamp}", std::process::id()));
+    fs::create_dir_all(&work_dir)?;
+    let script_path = work_dir.join("convert.py");
+    let out_path = work_dir.join("converted.glb");
+    fs::write(&script_path, blender_script(path, &out_path).as_bytes())?;
+
+    let output = run_blender(&script_path)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(AppError::Other(format!(
+            "Blender exited with {}.\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            tail(&stdout, 40),
+            tail(&stderr, 40)
+        )));
+    }
+    if !out_path.exists() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(AppError::Other(format!(
+            "Blender did not produce a converted GLB.\nstdout:\n{}\nstderr:\n{}",
+            tail(&stdout, 40),
+            tail(&stderr, 40)
+        )));
+    }
+
+    let meshes = parse_glb(&fs::read(&out_path)?, &file_stem(path), scale)?;
+    let _ = fs::remove_file(&script_path);
+    let _ = fs::remove_file(&out_path);
+    let _ = fs::remove_dir(&work_dir);
+    Ok(meshes)
+}
+
+fn run_blender(script_path: &Path) -> AppResult<std::process::Output> {
+    let mut candidates = Vec::<String>::new();
+    if let Ok(path) = std::env::var("BLENDER") {
+        if !path.trim().is_empty() {
+            candidates.push(path);
+        }
+    }
+    candidates.extend(discover_blender_with_where());
+    candidates.extend([
+        "blender".to_string(),
+        "blender.exe".to_string(),
+        "blender.cmd".to_string(),
+    ]);
+
+    let mut last_err = None;
+    for candidate in candidates {
+        let mut command = if is_shell_script(&candidate) {
+            let mut command = Command::new("cmd");
+            command.arg("/C").arg(&candidate);
+            command
+        } else {
+            Command::new(&candidate)
+        };
+        match command
+            .arg("--background")
+            .arg("--factory-startup")
+            .arg("--python")
+            .arg(script_path)
+            .output()
+        {
+            Ok(output) => return Ok(output),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                last_err = Some(format!("{candidate}: {err}"));
+            }
+            Err(err) => return Err(AppError::Other(format!("could not run {candidate}: {err}"))),
+        }
+    }
+
+    Err(AppError::Other(format!(
+        "could not run Blender. Set BLENDER to the Blender executable or convert this file to OBJ/STL/glTF/GLB first. Last error: {}",
+        last_err.unwrap_or_else(|| "no candidates tried".into())
+    )))
+}
+
+fn discover_blender_with_where() -> Vec<String> {
+    let Ok(output) = Command::new("where.exe").arg("blender").output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn is_shell_script(candidate: &str) -> bool {
+    let lower = candidate.to_ascii_lowercase();
+    lower.ends_with(".cmd") || lower.ends_with(".bat")
+}
+
+fn blender_script(source: &Path, target: &Path) -> String {
+    format!(
+        r#"
+import bpy
+import os
+
+source = {source}
+target = {target}
+ext = os.path.splitext(source)[1].lower()
+
+def reset_scene():
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete()
+
+def import_source():
+    if ext == '.fbx':
+        bpy.ops.import_scene.fbx(filepath=source)
+    elif ext == '.dae':
+        bpy.ops.wm.collada_import(filepath=source)
+    elif ext == '.blend':
+        bpy.ops.wm.open_mainfile(filepath=source)
+    elif ext == '.ply':
+        bpy.ops.wm.ply_import(filepath=source)
+    elif ext == '.abc':
+        bpy.ops.wm.alembic_import(filepath=source)
+    elif ext in ('.usd', '.usda', '.usdc'):
+        bpy.ops.wm.usd_import(filepath=source)
+    elif ext == '.obj':
+        bpy.ops.wm.obj_import(filepath=source)
+    elif ext == '.stl':
+        bpy.ops.wm.stl_import(filepath=source)
+    elif ext in ('.gltf', '.glb'):
+        bpy.ops.import_scene.gltf(filepath=source)
+    else:
+        raise RuntimeError('Blender import fallback does not support ' + ext)
+
+reset_scene()
+import_source()
+mesh_objects = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH']
+if not mesh_objects:
+    raise RuntimeError('No mesh objects were imported')
+
+bpy.ops.object.select_all(action='DESELECT')
+for obj in mesh_objects:
+    obj.select_set(True)
+bpy.context.view_layer.objects.active = mesh_objects[0]
+bpy.ops.export_scene.gltf(filepath=target, export_format='GLB', use_selection=True)
+"#,
+        source = py_string(source),
+        target = py_string(target)
+    )
+}
+
+fn py_string(path: &Path) -> String {
+    let value = path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
+    format!("'{value}'")
+}
+
+fn tail(value: &str, max_lines: usize) -> String {
+    let lines = value.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
 }
 
 #[derive(Debug)]
@@ -344,6 +526,38 @@ fn parse_ascii_stl(bytes: &[u8], fallback_name: &str, scale: f32) -> AppResult<I
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Mat4([f32; 16]);
+
+impl Mat4 {
+    fn identity() -> Self {
+        Self([
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ])
+    }
+
+    fn mul(self, rhs: Self) -> Self {
+        let mut out = [0.0f32; 16];
+        for col in 0..4 {
+            for row in 0..4 {
+                out[col * 4 + row] = (0..4)
+                    .map(|k| self.0[k * 4 + row] * rhs.0[col * 4 + k])
+                    .sum();
+            }
+        }
+        Self(out)
+    }
+
+    fn transform_point(self, point: [f32; 3]) -> [f32; 3] {
+        let [x, y, z] = point;
+        [
+            self.0[0] * x + self.0[4] * y + self.0[8] * z + self.0[12],
+            self.0[1] * x + self.0[5] * y + self.0[9] * z + self.0[13],
+            self.0[2] * x + self.0[6] * y + self.0[10] * z + self.0[14],
+        ]
+    }
+}
+
 #[derive(Debug, Clone)]
 struct GltfBufferView {
     buffer: usize,
@@ -455,53 +669,36 @@ fn parse_gltf_document(
         .ok_or_else(|| AppError::Other("glTF missing meshes".into()))?;
     let mut imported = Vec::<ImportMesh>::new();
 
-    for (mesh_index, mesh) in meshes.iter().enumerate() {
-        let mesh_name = mesh
-            .get("name")
-            .and_then(|value| value.as_str())
-            .unwrap_or(fallback_name);
-        let Some(primitives) = mesh.get("primitives").and_then(|value| value.as_array()) else {
-            continue;
-        };
-        for (primitive_index, primitive) in primitives.iter().enumerate() {
-            let mode = primitive
-                .get("mode")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(4);
-            if mode != 4 {
-                continue;
-            }
-            let position_accessor = primitive
-                .get("attributes")
-                .and_then(|value| value.get("POSITION"))
-                .and_then(|value| value.as_u64())
-                .ok_or_else(|| {
-                    AppError::Other(format!(
-                        "glTF mesh {mesh_index} primitive {primitive_index} missing POSITION"
-                    ))
-                })? as usize;
-            let vertices =
-                read_gltf_positions(document, &buffer_views, &buffers, position_accessor, scale)?;
-            let triangles = if let Some(index_accessor) =
-                primitive.get("indices").and_then(|value| value.as_u64())
-            {
-                read_gltf_indices(document, &buffer_views, &buffers, index_accessor as usize)?
-            } else {
-                sequential_triangles(vertices.len())?
-            };
-            if triangles.is_empty() {
-                continue;
-            }
-            let name = if primitives.len() == 1 {
-                mesh_name.to_string()
-            } else {
-                format!("{mesh_name}_{primitive_index}")
-            };
-            imported.push(ImportMesh {
-                name,
-                vertices,
-                triangles,
-            });
+    if let Some(nodes) = document.get("nodes").and_then(|value| value.as_array()) {
+        let roots = gltf_scene_roots(document)?;
+        for node_index in roots {
+            append_gltf_node(
+                document,
+                &buffer_views,
+                &buffers,
+                meshes,
+                nodes,
+                node_index,
+                Mat4::identity(),
+                fallback_name,
+                scale,
+                &mut imported,
+            )?;
+        }
+    } else {
+        for mesh_index in 0..meshes.len() {
+            append_gltf_mesh(
+                document,
+                &buffer_views,
+                &buffers,
+                meshes,
+                mesh_index,
+                None,
+                Mat4::identity(),
+                fallback_name,
+                scale,
+                &mut imported,
+            )?;
         }
     }
 
@@ -511,6 +708,245 @@ fn parse_gltf_document(
         ));
     }
     Ok(imported)
+}
+
+fn gltf_scene_roots(document: &serde_json::Value) -> AppResult<Vec<usize>> {
+    let scenes = document
+        .get("scenes")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| AppError::Other("glTF missing scenes".into()))?;
+    let scene_index = document
+        .get("scene")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as usize;
+    let scene = scenes
+        .get(scene_index)
+        .ok_or_else(|| AppError::Other(format!("glTF scene {scene_index} not found")))?;
+    Ok(scene
+        .get("nodes")
+        .and_then(|value| value.as_array())
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|value| value.as_u64().map(|value| value as usize))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_gltf_node(
+    document: &serde_json::Value,
+    buffer_views: &[GltfBufferView],
+    buffers: &[Vec<u8>],
+    meshes: &[serde_json::Value],
+    nodes: &[serde_json::Value],
+    node_index: usize,
+    parent_transform: Mat4,
+    fallback_name: &str,
+    scale: f32,
+    imported: &mut Vec<ImportMesh>,
+) -> AppResult<()> {
+    let node = nodes
+        .get(node_index)
+        .ok_or_else(|| AppError::Other(format!("glTF node {node_index} not found")))?;
+    let transform = parent_transform.mul(gltf_node_transform(node)?);
+    if let Some(mesh_index) = node.get("mesh").and_then(|value| value.as_u64()) {
+        let node_name = node.get("name").and_then(|value| value.as_str());
+        append_gltf_mesh(
+            document,
+            buffer_views,
+            buffers,
+            meshes,
+            mesh_index as usize,
+            node_name,
+            transform,
+            fallback_name,
+            scale,
+            imported,
+        )?;
+    }
+
+    if let Some(children) = node.get("children").and_then(|value| value.as_array()) {
+        for child in children {
+            if let Some(child_index) = child.as_u64() {
+                append_gltf_node(
+                    document,
+                    buffer_views,
+                    buffers,
+                    meshes,
+                    nodes,
+                    child_index as usize,
+                    transform,
+                    fallback_name,
+                    scale,
+                    imported,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_gltf_mesh(
+    document: &serde_json::Value,
+    buffer_views: &[GltfBufferView],
+    buffers: &[Vec<u8>],
+    meshes: &[serde_json::Value],
+    mesh_index: usize,
+    node_name: Option<&str>,
+    transform: Mat4,
+    fallback_name: &str,
+    scale: f32,
+    imported: &mut Vec<ImportMesh>,
+) -> AppResult<()> {
+    let mesh = meshes
+        .get(mesh_index)
+        .ok_or_else(|| AppError::Other(format!("glTF mesh {mesh_index} not found")))?;
+    let mesh_name = node_name
+        .or_else(|| mesh.get("name").and_then(|value| value.as_str()))
+        .unwrap_or(fallback_name);
+    let Some(primitives) = mesh.get("primitives").and_then(|value| value.as_array()) else {
+        return Ok(());
+    };
+    for (primitive_index, primitive) in primitives.iter().enumerate() {
+        let mode = primitive
+            .get("mode")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(4);
+        if mode != 4 {
+            continue;
+        }
+        let position_accessor = primitive
+            .get("attributes")
+            .and_then(|value| value.get("POSITION"))
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| {
+                AppError::Other(format!(
+                    "glTF mesh {mesh_index} primitive {primitive_index} missing POSITION"
+                ))
+            })? as usize;
+        let mut vertices =
+            read_gltf_positions(document, buffer_views, buffers, position_accessor, scale)?;
+        for vertex in &mut vertices {
+            *vertex = transform.transform_point(*vertex);
+        }
+        let triangles = if let Some(index_accessor) =
+            primitive.get("indices").and_then(|value| value.as_u64())
+        {
+            read_gltf_indices(document, buffer_views, buffers, index_accessor as usize)?
+        } else {
+            sequential_triangles(vertices.len())?
+        };
+        if triangles.is_empty() {
+            continue;
+        }
+        let name = if primitives.len() == 1 {
+            mesh_name.to_string()
+        } else {
+            format!("{mesh_name}_{primitive_index}")
+        };
+        imported.push(ImportMesh {
+            name,
+            vertices,
+            triangles,
+        });
+    }
+    Ok(())
+}
+
+fn gltf_node_transform(node: &serde_json::Value) -> AppResult<Mat4> {
+    if let Some(matrix) = node.get("matrix") {
+        let values = json_f32_array(matrix, 16, "node matrix")?;
+        let mut out = [0.0f32; 16];
+        out.copy_from_slice(&values);
+        return Ok(Mat4(out));
+    }
+
+    let translation = node
+        .get("translation")
+        .map(|value| json_f32_array(value, 3, "node translation"))
+        .transpose()?
+        .unwrap_or_else(|| vec![0.0, 0.0, 0.0]);
+    let rotation = node
+        .get("rotation")
+        .map(|value| json_f32_array(value, 4, "node rotation"))
+        .transpose()?
+        .unwrap_or_else(|| vec![0.0, 0.0, 0.0, 1.0]);
+    let scale = node
+        .get("scale")
+        .map(|value| json_f32_array(value, 3, "node scale"))
+        .transpose()?
+        .unwrap_or_else(|| vec![1.0, 1.0, 1.0]);
+
+    let [x, y, z, w] = normalize_quat([rotation[0], rotation[1], rotation[2], rotation[3]]);
+    let xx = x * x;
+    let yy = y * y;
+    let zz = z * z;
+    let xy = x * y;
+    let xz = x * z;
+    let yz = y * z;
+    let wx = w * x;
+    let wy = w * y;
+    let wz = w * z;
+
+    let mut matrix = [
+        1.0 - 2.0 * (yy + zz),
+        2.0 * (xy + wz),
+        2.0 * (xz - wy),
+        0.0,
+        2.0 * (xy - wz),
+        1.0 - 2.0 * (xx + zz),
+        2.0 * (yz + wx),
+        0.0,
+        2.0 * (xz + wy),
+        2.0 * (yz - wx),
+        1.0 - 2.0 * (xx + yy),
+        0.0,
+        translation[0],
+        translation[1],
+        translation[2],
+        1.0,
+    ];
+    for row in 0..3 {
+        matrix[row] *= scale[0];
+        matrix[4 + row] *= scale[1];
+        matrix[8 + row] *= scale[2];
+    }
+
+    Ok(Mat4(matrix))
+}
+
+fn normalize_quat(mut quat: [f32; 4]) -> [f32; 4] {
+    let len =
+        (quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3]).sqrt();
+    if len > 0.0 {
+        for value in &mut quat {
+            *value /= len;
+        }
+    }
+    quat
+}
+
+fn json_f32_array(value: &serde_json::Value, len: usize, context: &str) -> AppResult<Vec<f32>> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| AppError::Other(format!("{context} must be an array")))?;
+    if array.len() != len {
+        return Err(AppError::Other(format!(
+            "{context} must contain {len} values"
+        )));
+    }
+    array
+        .iter()
+        .map(|value| {
+            value
+                .as_f64()
+                .map(|value| value as f32)
+                .ok_or_else(|| AppError::Other(format!("{context} contains a non-number")))
+        })
+        .collect()
 }
 
 fn parse_gltf_buffer_views(document: &serde_json::Value) -> AppResult<Vec<GltfBufferView>> {
@@ -846,5 +1282,31 @@ endsolid tri
         assert_eq!(meshes[0].name, "Tri");
         assert_eq!(meshes[0].vertices.len(), 3);
         assert_eq!(meshes[0].triangles, vec![[1, 2, 3]]);
+    }
+
+    #[test]
+    fn gltf_document_applies_node_translation() {
+        let mut buffer = Vec::new();
+        for value in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+            buffer.extend_from_slice(&value.to_le_bytes());
+        }
+        let document = serde_json::json!({
+            "buffers": [{ "byteLength": buffer.len() }],
+            "bufferViews": [{ "buffer": 0, "byteOffset": 0, "byteLength": 36 }],
+            "accessors": [
+                { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3" }
+            ],
+            "meshes": [{
+                "name": "Tri",
+                "primitives": [{ "attributes": { "POSITION": 0 } }]
+            }],
+            "nodes": [{ "name": "Moved", "mesh": 0, "translation": [2, 3, 4] }],
+            "scenes": [{ "nodes": [0] }],
+            "scene": 0
+        });
+        let meshes = parse_gltf_document(&document, vec![buffer], "asset", 1.0).unwrap();
+        assert_eq!(meshes[0].name, "Moved");
+        assert_eq!(meshes[0].vertices[0], [2.0, 3.0, 4.0]);
+        assert_eq!(meshes[0].vertices[1], [3.0, 3.0, 4.0]);
     }
 }

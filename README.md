@@ -10,7 +10,7 @@ A single-binary CLI plus Luau Studio plugin for programmatic Roblox Studio contr
 | `rs exec --studio X --lua "code"` | Run Luau in a Studio and return JSON |
 | `rs read --studio X --path Workspace --depth 2` | Read a rich JSON instance tree |
 | `rs export --studio X --path ServerStorage.Foo --out ./export` | Save a subtree as individual local files |
-| `rs import-asset --studio X --file ./mesh.obj --to Workspace` | Convert a local OBJ/STL/glTF/GLB into welded MeshParts |
+| `rs import-asset --studio X --file ./mesh.obj --to Workspace` | Convert a local mesh asset into welded MeshParts |
 | `rs transfer --from "A:Path" --to "B:ParentPath"` | Copy an instance tree from Studio A to Studio B |
 | `rs bridge serve/status/stop` | Manage the local bridge daemon |
 
@@ -56,11 +56,13 @@ The bridge auto-spawns on first CLI command and stays running until `rs bridge s
 audio, animations, and VFX textures are emitted as individual `.asset.json` reference files
 containing the source property and asset URI.
 
-`import-asset` currently supports local `.obj`, `.stl`, `.gltf`, and `.glb` static geometry.
-The CLI converts faces to triangles, sends the mesh payload to the Studio plugin, and the plugin
-builds MeshParts through `EditableMesh`. Multi-object files become multiple MeshParts welded
-together by default. This is a Studio-local import path; it does not upload permanent cloud mesh
-assets or preserve materials, textures, rigs, skin weights, or animations yet.
+`import-asset` natively supports local `.obj`, `.stl`, `.gltf`, and `.glb` static geometry.
+For other Blender-readable formats such as `.fbx`, `.dae`, `.ply`, `.abc`, `.usd`, and `.blend`,
+the CLI attempts a headless Blender conversion to GLB first. It then converts faces to triangles,
+sends the mesh payload to the Studio plugin, and the plugin builds MeshParts through `EditableMesh`.
+Multi-object files become multiple MeshParts welded together by default. This is a Studio-local
+import path; it does not upload permanent cloud mesh assets or preserve materials, textures, rigs,
+skin weights, or animations yet.
 
 ## Docs
 

@@ -85,13 +85,13 @@ enum Command {
         overwrite: bool,
     },
 
-    /// Import a local OBJ/STL/glTF/GLB mesh file into Studio as welded MeshParts.
+    /// Import a local mesh file into Studio as welded MeshParts.
     ImportAsset {
         /// Studio name, substring, or UUID. Optional if exactly one Studio is connected.
         #[arg(long)]
         studio: Option<String>,
 
-        /// Local .obj, .stl, .gltf, or .glb file to convert.
+        /// Local mesh file to convert. OBJ/STL/glTF/GLB are native; other formats use Blender if available.
         #[arg(long)]
         file: std::path::PathBuf,
 
