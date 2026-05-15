@@ -137,6 +137,35 @@ pub struct ImportAssetResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ImportImageRequest {
+    pub studio: Option<String>,
+    pub parent_path: String,
+    pub name: String,
+    pub kind: String,
+    pub width: u32,
+    pub height: u32,
+    pub ui_width: u32,
+    pub ui_height: u32,
+    pub position_x: i32,
+    pub position_y: i32,
+    pub pixels_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportImageResponse {
+    pub root_path: String,
+    pub gui_path: String,
+    pub image_path: String,
+    pub class_name: String,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExportRequest {
     pub studio: Option<String>,
     pub path: String,

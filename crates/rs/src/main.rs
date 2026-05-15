@@ -4,7 +4,7 @@ mod error;
 mod protocol;
 
 use crate::error::{AppError, AppResult};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "rs", version, about = "Roblox Studio CLI + local bridge")]
@@ -116,6 +116,37 @@ enum Command {
         no_weld: bool,
     },
 
+    /// Import a local PNG as Studio UI.
+    ImportImage {
+        /// Studio name, substring, or UUID. Optional if exactly one Studio is connected.
+        #[arg(long)]
+        studio: Option<String>,
+
+        /// Local .png file to import.
+        #[arg(long)]
+        file: std::path::PathBuf,
+
+        /// Dot path of the Studio UI parent to insert under.
+        #[arg(long, default_value = "StarterGui")]
+        to: String,
+
+        /// Imported GUI object name. Defaults to the local file stem.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// UI object kind to create.
+        #[arg(long, value_enum, default_value_t = ImageKind::Image)]
+        kind: ImageKind,
+
+        /// UI size in pixels, like 64x64. Defaults to the PNG size after import scaling.
+        #[arg(long)]
+        size: Option<String>,
+
+        /// UI position in pixels, like 0,0.
+        #[arg(long, default_value = "0,0")]
+        position: String,
+    },
+
     /// Manage the local bridge daemon.
     Bridge {
         #[command(subcommand)]
@@ -137,6 +168,18 @@ enum BridgeCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum ImageKind {
+    /// Non-clickable ImageLabel.
+    Image,
+
+    /// Clickable ImageButton.
+    Button,
+
+    /// Non-clickable icon-sized ImageLabel.
+    Icon,
 }
 
 fn main() {
@@ -174,6 +217,24 @@ fn run() -> AppResult<()> {
             anchored,
             no_weld,
         } => cli::import_asset::run(args.port, studio, file, to, name, scale, anchored, !no_weld),
+        Command::ImportImage {
+            studio,
+            file,
+            to,
+            name,
+            kind,
+            size,
+            position,
+        } => cli::import_image::run(
+            args.port,
+            studio,
+            file,
+            to,
+            name,
+            kind.as_str().to_string(),
+            size,
+            position,
+        ),
         Command::Bridge { command } => match command {
             BridgeCommand::Serve => {
                 let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -185,5 +246,15 @@ fn run() -> AppResult<()> {
             BridgeCommand::Stop => cli::bridge::stop(args.port),
             BridgeCommand::Status { json } => cli::bridge::status(args.port, json),
         },
+    }
+}
+
+impl ImageKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ImageKind::Image => "image",
+            ImageKind::Button => "button",
+            ImageKind::Icon => "icon",
+        }
     }
 }

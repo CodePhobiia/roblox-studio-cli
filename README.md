@@ -11,6 +11,7 @@ A single-binary CLI plus Luau Studio plugin for programmatic Roblox Studio contr
 | `rs read --studio X --path Workspace --depth 2` | Read a rich JSON instance tree |
 | `rs export --studio X --path ServerStorage.Foo --out ./export` | Save a subtree as individual local files |
 | `rs import-asset --studio X --file ./mesh.obj --to Workspace` | Convert a local mesh asset into welded MeshParts |
+| `rs import-image --studio X --file ./icon.png --kind button --to StarterGui` | Import a local PNG as GUI UI |
 | `rs transfer --from "A:Path" --to "B:ParentPath"` | Copy an instance tree from Studio A to Studio B |
 | `rs bridge serve/status/stop` | Manage the local bridge daemon |
 
@@ -46,6 +47,7 @@ rs exec --studio "Snipe a Slime!" --lua "return #game.ReplicatedStorage:GetChild
 rs read --studio "Snipe a Slime!" --path "Workspace" --depth 1
 rs export --studio "Snipe a Slime!" --path "ServerStorage.SniperSkins" --out ".\exports\snipers"
 rs import-asset --studio "Snipe a Slime!" --file ".\assets\crate.obj" --to "Workspace" --name "Crate"
+rs import-image --studio "Snipe a Slime!" --file ".\assets\shop.png" --to "StarterGui" --kind button --size 96x96
 rs transfer --from "Snipe for Brainrots!:ServerStorage.SniperSkins" --to "Snipe a Slime!:ServerStorage"
 ```
 
@@ -63,6 +65,12 @@ sends the mesh payload to the Studio plugin, and the plugin builds MeshParts thr
 Multi-object files become multiple MeshParts welded together by default. This is a Studio-local
 import path; it does not upload permanent cloud mesh assets or preserve materials, textures, rigs,
 skin weights, or animations yet.
+
+`import-image` supports local `.png` files. The CLI decodes the PNG to RGBA pixels, downscales
+images larger than Roblox's editable-image size limit, and sends the pixels to Studio. The plugin
+creates an `EditableImage`, assigns it to `ImageContent`, and inserts either an `ImageLabel`,
+`ImageButton`, or icon-sized `ImageLabel`. When the target parent is `StarterGui` or `PlayerGui`,
+the plugin creates a `ScreenGui` container automatically.
 
 ## Docs
 

@@ -71,3 +71,26 @@ fn import_asset_request_roundtrips() {
     assert_eq!(back.meshes.len(), 1);
     assert_eq!(back.meshes[0].triangles[0], [1, 2, 3]);
 }
+
+#[test]
+fn import_image_request_roundtrips() {
+    let req = ImportImageRequest {
+        studio: Some("Snipe a Slime!".to_string()),
+        parent_path: "StarterGui".to_string(),
+        name: "Icon".to_string(),
+        kind: "button".to_string(),
+        width: 2,
+        height: 2,
+        ui_width: 32,
+        ui_height: 32,
+        position_x: 4,
+        position_y: 8,
+        pixels_base64: "AAAA".to_string(),
+    };
+
+    let s = serde_json::to_string(&req).unwrap();
+    let back: ImportImageRequest = serde_json::from_str(&s).unwrap();
+    assert_eq!(back.parent_path, "StarterGui");
+    assert_eq!(back.kind, "button");
+    assert_eq!(back.ui_width, 32);
+}

@@ -21,6 +21,7 @@ All bridge endpoints use JSON.
 | `POST` | `/read` | Enqueue instance-tree read |
 | `POST` | `/export` | Extract a subtree into individual file payloads |
 | `POST` | `/import-asset` | Build local mesh payloads into welded Studio MeshParts |
+| `POST` | `/import-image` | Build local PNG pixel payloads into Studio GUI image objects |
 | `POST` | `/transfer` | Serialize from source and deserialize into target |
 | `POST` | `/shutdown` | Graceful bridge shutdown |
 

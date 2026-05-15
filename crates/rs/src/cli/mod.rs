@@ -2,6 +2,7 @@ pub mod bridge;
 pub mod exec;
 pub mod export;
 pub mod import_asset;
+pub mod import_image;
 pub mod list;
 pub mod read;
 pub mod transfer;

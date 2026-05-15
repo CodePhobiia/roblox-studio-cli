@@ -7,6 +7,7 @@ Dispatch.register("exec", require(script.Parent.Handlers.Exec))
 Dispatch.register("read", require(script.Parent.Handlers.Read))
 Dispatch.register("export", require(script.Parent.Handlers.Export))
 Dispatch.register("importAsset", require(script.Parent.Handlers.ImportAsset))
+Dispatch.register("importImage", require(script.Parent.Handlers.ImportImage))
 Dispatch.register("serialize", require(script.Parent.Handlers.Serialize))
 Dispatch.register("deserialize", require(script.Parent.Handlers.Deserialize))
 
