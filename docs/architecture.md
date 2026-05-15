@@ -10,4 +10,4 @@ CLI commands probe `/healthz`. If the bridge is missing, they spawn `rs bridge s
 
 Studio sessions are selected by UUID, exact name, or unique case-insensitive substring. If more than one Studio matches, the bridge returns an ambiguity error and the CLI asks the user to disambiguate by UUID.
 
-The bridge stores one queue per Studio session. `exec` and `read` enqueue one plugin command and wait for its result. `transfer` enqueues a `serialize` command on the source Studio, then a `deserialize` command on the target Studio with the returned blob.
+The bridge stores one queue per Studio session. `exec`, `read`, and `export` enqueue one plugin command and wait for its result. `export` returns file payloads that the CLI writes to disk after validating every relative path. `transfer` enqueues a `serialize` command on the source Studio, then a `deserialize` command on the target Studio with the returned blob.

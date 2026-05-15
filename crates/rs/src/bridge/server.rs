@@ -2,8 +2,8 @@ use crate::bridge::orchestrator::run_transfer;
 use crate::bridge::registry::Registry;
 use crate::error::{AppError, AppResult};
 use crate::protocol::messages::{
-    CommandResult, Envelope, ExecRequest, PluginCommand, ReadRequest, RegisterRequest,
-    RegisterResponse, TransferRequest,
+    CommandResult, Envelope, ExecRequest, ExportRequest, PluginCommand, ReadRequest,
+    RegisterRequest, RegisterResponse, TransferRequest,
 };
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
@@ -52,6 +52,7 @@ fn build_router(state: AppState) -> Router {
         .route("/studios", get(studios))
         .route("/exec", post(exec))
         .route("/read", post(read))
+        .route("/export", post(export))
         .route("/transfer", post(transfer))
         .route("/shutdown", post(shutdown))
         .with_state(state)
@@ -138,6 +139,24 @@ async fn read(
         "read",
         serde_json::json!({ "path": req.path, "depth": req.depth }),
         30,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn export(
+    State(state): State<AppState>,
+    Json(req): Json<ExportRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "export",
+        serde_json::json!({ "path": req.path, "depth": req.depth }),
+        120,
     )
     .await
     {

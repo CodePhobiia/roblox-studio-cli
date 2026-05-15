@@ -62,6 +62,29 @@ enum Command {
         to: String,
     },
 
+    /// Export Studio instances into individual local files.
+    Export {
+        /// Studio name, substring, or UUID. Optional if exactly one Studio is connected.
+        #[arg(long)]
+        studio: Option<String>,
+
+        /// Dot path such as ServerStorage.SniperSkins or ReplicatedStorage.Modules.
+        #[arg(long)]
+        path: String,
+
+        /// Output directory to write files into.
+        #[arg(long)]
+        out: std::path::PathBuf,
+
+        /// Optional descendant depth. Omit to export the whole subtree.
+        #[arg(long)]
+        depth: Option<u32>,
+
+        /// Overwrite existing files.
+        #[arg(long)]
+        overwrite: bool,
+    },
+
     /// Manage the local bridge daemon.
     Bridge {
         #[command(subcommand)]
@@ -104,6 +127,13 @@ fn run() -> AppResult<()> {
             depth,
         } => cli::read::run(args.port, studio, path, depth),
         Command::Transfer { from, to } => cli::transfer::run(args.port, from, to),
+        Command::Export {
+            studio,
+            path,
+            out,
+            depth,
+            overwrite,
+        } => cli::export::run(args.port, studio, path, out, depth, overwrite),
         Command::Bridge { command } => match command {
             BridgeCommand::Serve => {
                 let runtime = tokio::runtime::Builder::new_multi_thread()

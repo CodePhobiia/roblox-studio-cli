@@ -19,6 +19,7 @@ All bridge endpoints use JSON.
 | `GET` | `/studios` | Connected Studio list |
 | `POST` | `/exec` | Enqueue Luau execution |
 | `POST` | `/read` | Enqueue instance-tree read |
+| `POST` | `/export` | Extract a subtree into individual file payloads |
 | `POST` | `/transfer` | Serialize from source and deserialize into target |
 | `POST` | `/shutdown` | Graceful bridge shutdown |
 

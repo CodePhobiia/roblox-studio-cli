@@ -102,3 +102,32 @@ pub struct TransferRequest {
     pub to_studio: String,
     pub to_parent_path: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportRequest {
+    pub studio: Option<String>,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportFile {
+    pub path: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResponse {
+    pub root_path: String,
+    pub files: Vec<ExportFile>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}

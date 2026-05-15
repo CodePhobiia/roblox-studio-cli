@@ -29,3 +29,23 @@ fn register_request_roundtrips() {
     assert_eq!(back.id, "abc-123");
     assert_eq!(back.name, "Snipe a Slime!");
 }
+
+#[test]
+fn export_response_roundtrips() {
+    let response = ExportResponse {
+        root_path: "ServerStorage.SniperSkins".to_string(),
+        files: vec![ExportFile {
+            path: "SniperSkins/0000_SniperSkins_Folder/instance.json".to_string(),
+            kind: "metadata".to_string(),
+            content: None,
+            json: Some(serde_json::json!({"className": "Folder"})),
+        }],
+        warnings: vec![],
+    };
+
+    let s = serde_json::to_string(&response).unwrap();
+    let back: ExportResponse = serde_json::from_str(&s).unwrap();
+    assert_eq!(back.root_path, "ServerStorage.SniperSkins");
+    assert_eq!(back.files.len(), 1);
+    assert_eq!(back.files[0].kind, "metadata");
+}

@@ -259,11 +259,181 @@ return Dispatch
 ]]></string>
       </Properties>
     </Item>
-    <Item class="Folder" referent="4">
+    <Item class="ModuleScript" referent="4">
+      <Properties>
+        <string name="Name">Exporter</string>
+        <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
+local Serializer = require(script.Parent.Serializer)
+
+local Exporter = {}
+
+local ASSET_PROPERTIES = {
+    AnimationId = "animation",
+    Image = "image",
+    MeshId = "mesh",
+    SoundId = "audio",
+    Texture = "image",
+    TextureID = "image",
+    TextureId = "image"
+}
+
+local SCRIPT_EXTENSIONS = {
+    Script = ".server.lua",
+    LocalScript = ".client.lua",
+    ModuleScript = ".module.lua"
+}
+
+local function sanitize(value)
+    value = tostring(value or "unnamed")
+    value = string.gsub(value, "[<>:\"/\\|%?%*%c]", "_")
+    value = string.gsub(value, "^%s+", "")
+    value = string.gsub(value, "%s+$", "")
+    if value == "" then
+        value = "unnamed"
+    end
+    if #value > 80 then
+        value = string.sub(value, 1, 80)
+    end
+    return value
+end
+
+local function joinPath(a, b)
+    if a == "" then
+        return b
+    end
+    return a .. "/" .. b
+end
+
+local function padded(index)
+    return string.format("%04d", index)
+end
+
+local function cloneJson(value)
+    local ok, encoded = pcall(function()
+        return HttpService:JSONEncode(value)
+    end)
+    if not ok then
+        return value
+    end
+    local okDecode, decoded = pcall(function()
+        return HttpService:JSONDecode(encoded)
+    end)
+    return okDecode and decoded or value
+end
+
+local function addFile(files, path, kind, content, json)
+    table.insert(files, {
+        path = path,
+        kind = kind,
+        content = content,
+        json = json
+    })
+end
+
+local function assetKindFor(instance, property)
+    if instance:IsA("ParticleEmitter") or instance:IsA("Beam") or instance:IsA("Trail") then
+        if property == "Texture" then
+            return "vfx-texture"
+        end
+    end
+    return ASSET_PROPERTIES[property]
+end
+
+local function addAssetFiles(files, dir, metadata)
+    for property, value in pairs(metadata.properties or {}) do
+        local kind = assetKindFor({
+            IsA = function(_, className)
+                return metadata.className == className
+            end
+        }, property)
+        if kind and type(value) == "string" and value ~= "" then
+            addFile(files, joinPath(dir, "assets/" .. sanitize(property) .. ".asset.json"), kind, nil, {
+                instancePath = metadata.fullPath,
+                className = metadata.className,
+                property = property,
+                assetUri = value,
+                assetKind = kind
+            })
+        end
+    end
+end
+
+local function addScriptFile(files, dir, instance, metadata)
+    local extension = SCRIPT_EXTENSIONS[instance.ClassName]
+    if not extension then
+        return
+    end
+
+    local ok, source = pcall(function()
+        return instance.Source
+    end)
+    if ok and type(source) == "string" then
+        metadata.properties = metadata.properties or {}
+        metadata.properties.Source = nil
+        addFile(files, joinPath(dir, sanitize(instance.Name) .. extension), "script", source, nil)
+    end
+end
+
+function Exporter.export(root, maxDepth)
+    local files = {}
+    local warnings = {}
+    local nextIndex = 0
+
+    local function walk(instance, parentDir, remainingDepth)
+        local index = nextIndex
+        nextIndex += 1
+        local dirName = padded(index) .. "_" .. sanitize(instance.Name) .. "_" .. sanitize(instance.ClassName)
+        local dir = joinPath(parentDir, dirName)
+        local metadata = Serializer.readInstance(instance, 0)
+        metadata.childrenCount = #instance:GetChildren()
+        metadata.exportDirectory = dir
+
+        if metadata.warnings then
+            for _, warning in ipairs(metadata.warnings) do
+                table.insert(warnings, warning)
+            end
+            metadata.warnings = nil
+        end
+
+        metadata = cloneJson(metadata)
+        addScriptFile(files, dir, instance, metadata)
+        addAssetFiles(files, dir, metadata)
+        addFile(files, joinPath(dir, "instance.json"), "metadata", nil, metadata)
+
+        if remainingDepth == nil or remainingDepth > 0 then
+            local childDepth = nil
+            if remainingDepth ~= nil then
+                childDepth = remainingDepth - 1
+            end
+            for _, child in ipairs(instance:GetChildren()) do
+                walk(child, dir, childDepth)
+            end
+        end
+    end
+
+    walk(root, sanitize(root.Name), maxDepth)
+    addFile(files, sanitize(root.Name) .. "/export_manifest.json", "manifest", nil, {
+        rootPath = root:GetFullName(),
+        fileCount = #files + 1,
+        warnings = warnings
+    })
+
+    return {
+        rootPath = root:GetFullName(),
+        files = files,
+        warnings = warnings
+    }
+end
+
+return Exporter
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="Folder" referent="5">
       <Properties>
         <string name="Name">Handlers</string>
       </Properties>
-      <Item class="ModuleScript" referent="5">
+      <Item class="ModuleScript" referent="6">
         <Properties>
           <string name="Name">Deserialize</string>
           <string name="Source"><![CDATA[local Deserializer = require(script.Parent.Parent.Deserializer)
@@ -322,7 +492,7 @@ return deserializeHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="6">
+      <Item class="ModuleScript" referent="7">
         <Properties>
           <string name="Name">Exec</string>
           <string name="Source"><![CDATA[local Encoders = require(script.Parent.Parent.PropertyEncoders)
@@ -360,7 +530,71 @@ return execHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="7">
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">Export</string>
+          <string name="Source"><![CDATA[local Exporter = require(script.Parent.Parent.Exporter)
+
+local function splitPath(path)
+    local parts = {}
+    for part in string.gmatch(path, "[^%.]+") do
+        table.insert(parts, part)
+    end
+    return parts
+end
+
+local function resolvePath(path)
+    if path == "game" or path == "DataModel" then
+        return game
+    end
+
+    local node = game
+    for i, part in ipairs(splitPath(path)) do
+        if i == 1 then
+            local service = game:FindFirstChild(part)
+            if not service then
+                local ok, result = pcall(function()
+                    return game:GetService(part)
+                end)
+                service = ok and result or nil
+            end
+            node = service
+        else
+            node = node and node:FindFirstChild(part)
+        end
+        if not node then
+            return nil
+        end
+    end
+    return node
+end
+
+local function exportHandler(payload)
+    if type(payload.path) ~= "string" then
+        return { ok = false, error = "path missing" }
+    end
+
+    local target = resolvePath(payload.path)
+    if not target then
+        return { ok = false, error = "path not found: " .. payload.path }
+    end
+
+    local depth = nil
+    if payload.depth ~= nil then
+        depth = tonumber(payload.depth)
+        if not depth or depth < 0 then
+            return { ok = false, error = "depth must be a non-negative number" }
+        end
+    end
+
+    return { ok = true, data = Exporter.export(target, depth) }
+end
+
+return exportHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
         <Properties>
           <string name="Name">Read</string>
           <string name="Source"><![CDATA[local Serializer = require(script.Parent.Parent.Serializer)
@@ -414,7 +648,7 @@ return readHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="8">
+      <Item class="ModuleScript" referent="10">
         <Properties>
           <string name="Name">Serialize</string>
           <string name="Source"><![CDATA[local Serializer = require(script.Parent.Parent.Serializer)
@@ -465,7 +699,7 @@ return serializeHandler
         </Properties>
       </Item>
     </Item>
-    <Item class="ModuleScript" referent="9">
+    <Item class="ModuleScript" referent="11">
       <Properties>
         <string name="Name">Http</string>
         <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
@@ -527,7 +761,7 @@ return Http
 ]]></string>
       </Properties>
     </Item>
-    <Item class="Script" referent="10">
+    <Item class="Script" referent="12">
       <Properties>
         <string name="Name">Main</string>
         <token name="RunContext">0</token>
@@ -538,6 +772,7 @@ local Dispatch = require(script.Parent.Dispatch)
 
 Dispatch.register("exec", require(script.Parent.Handlers.Exec))
 Dispatch.register("read", require(script.Parent.Handlers.Read))
+Dispatch.register("export", require(script.Parent.Handlers.Export))
 Dispatch.register("serialize", require(script.Parent.Handlers.Serialize))
 Dispatch.register("deserialize", require(script.Parent.Handlers.Deserialize))
 
@@ -677,7 +912,7 @@ end)
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="11">
+    <Item class="ModuleScript" referent="13">
       <Properties>
         <string name="Name">PropertyAllowlist</string>
         <string name="Source"><![CDATA[local Allowlist = {}
@@ -820,7 +1055,7 @@ return Allowlist
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="12">
+    <Item class="ModuleScript" referent="14">
       <Properties>
         <string name="Name">PropertyEncoders</string>
         <string name="Source"><![CDATA[local Encoders = {}
@@ -973,7 +1208,7 @@ return Encoders
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="13">
+    <Item class="ModuleScript" referent="15">
       <Properties>
         <string name="Name">Serializer</string>
         <string name="Source"><![CDATA[local CollectionService = game:GetService("CollectionService")
