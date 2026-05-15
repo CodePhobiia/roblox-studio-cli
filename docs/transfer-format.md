@@ -26,6 +26,6 @@ Instance references are encoded as synthetic IDs:
 ["Ref", "i7"]
 ```
 
-The deserializer creates every instance first, parents the tree, then applies properties so `Weld.Part0`, `Weld.Part1`, `Motor6D.Part0`, `ObjectValue.Value`, and similar references can resolve across the transferred tree.
+The deserializer first pre-creates MeshParts with `AssetService:CreateMeshPartAsync`, waits for those creations to finish, then creates every remaining instance into the same ID map. It applies properties before parenting the tree so `Weld.Part0`, `Weld.Part1`, `Motor6D.Part0`, `ObjectValue.Value`, and similar references resolve against the complete transferred subtree.
 
 Supported scalar and structured encodings include primitives, `Vector2`, `Vector3`, `CFrame`, `Color3`, `BrickColor`, `UDim`, `UDim2`, `Rect`, `EnumItem`, `ColorSequence`, `NumberSequence`, `NumberRange`, `PhysicalProperties`, and object references.

@@ -9,6 +9,13 @@ local SKIP_PROPS = {
     ClassName = true
 }
 
+local MESHPART_CREATION_PROPS = {
+    MeshId = true,
+    MeshContent = true,
+    CollisionFidelity = true,
+    RenderFidelity = true
+}
+
 local function destroyCreated(created)
     for i = #created, 1, -1 do
         pcall(function()
@@ -17,7 +24,7 @@ local function destroyCreated(created)
     end
 end
 
-local function decodeCollisionFidelity(encoded)
+local function decodeEnumOr(encoded, enumType, defaultValue)
     local decoded = nil
     if encoded ~= nil then
         local ok, result = pcall(function()
@@ -27,21 +34,44 @@ local function decodeCollisionFidelity(encoded)
             decoded = result
         end
     end
-    if typeof(decoded) == "EnumItem" and decoded.EnumType == Enum.CollisionFidelity then
+    if typeof(decoded) == "EnumItem" and decoded.EnumType == enumType then
         return decoded
     end
-    return Enum.CollisionFidelity.Default
+    return defaultValue
 end
 
 local function createMeshPart(spec, warnings)
     local props = spec.properties or {}
     local meshId = props.MeshId
     if type(meshId) == "string" and meshId ~= "" and Content and Content.fromUri then
+        local collisionFidelity = decodeEnumOr(
+            props.CollisionFidelity,
+            Enum.CollisionFidelity,
+            Enum.CollisionFidelity.Default
+        )
+        local renderEnum = Enum.RenderFidelity
+        local renderFidelity = renderEnum and decodeEnumOr(
+            props.RenderFidelity,
+            renderEnum,
+            renderEnum.Automatic
+        ) or nil
+        local content = Content.fromUri(meshId)
         local ok, meshPartOrErr = pcall(function()
-            return AssetService:CreateMeshPartAsync(Content.fromUri(meshId), {
-                CollisionFidelity = decodeCollisionFidelity(props.CollisionFidelity)
-            })
+            local options = {
+                CollisionFidelity = collisionFidelity
+            }
+            if renderFidelity then
+                options.RenderFidelity = renderFidelity
+            end
+            return AssetService:CreateMeshPartAsync(content, options)
         end)
+        if not ok then
+            ok, meshPartOrErr = pcall(function()
+                return AssetService:CreateMeshPartAsync(content, {
+                    CollisionFidelity = collisionFidelity
+                })
+            end)
+        end
         if ok and meshPartOrErr then
             return meshPartOrErr
         end
@@ -98,11 +128,37 @@ local function applyTags(instance, tags, warnings)
     end
 end
 
-local function applyOneProperty(instance, prop, encoded, idMap, warnings)
+local function precreateMeshParts(instances, idMap, created, warnings)
+    local pending = 0
+    local done = Instance.new("BindableEvent")
+
+    for id, spec in pairs(instances) do
+        local props = type(spec) == "table" and spec.properties or nil
+        if type(spec) == "table" and spec.className == "MeshPart" and type(props) == "table" and type(props.MeshId) == "string" and props.MeshId ~= "" then
+            pending += 1
+            task.spawn(function()
+                local instance = createMeshPart(spec, warnings)
+                idMap[id] = instance
+                table.insert(created, instance)
+                pending -= 1
+                if pending == 0 then
+                    done:Fire()
+                end
+            end)
+        end
+    end
+
+    if pending > 0 then
+        done.Event:Wait()
+    end
+    done:Destroy()
+end
+
+local function applyOneProperty(instance, className, prop, encoded, idMap, warnings)
     if SKIP_PROPS[prop] then
         return
     end
-    if instance:IsA("MeshPart") and (prop == "MeshId" or prop == "MeshContent") then
+    if className == "MeshPart" and MESHPART_CREATION_PROPS[prop] then
         return
     end
 
@@ -120,25 +176,25 @@ local function applyOneProperty(instance, prop, encoded, idMap, warnings)
     end
 end
 
-local function applyProperties(instance, props, idMap, warnings)
+local function applyProperties(instance, className, props, idMap, warnings)
     props = props or {}
     local applied = {}
 
     for _, prop in ipairs({ "Name", "BrickColor" }) do
         if props[prop] ~= nil then
-            applyOneProperty(instance, prop, props[prop], idMap, warnings)
+            applyOneProperty(instance, className, prop, props[prop], idMap, warnings)
             applied[prop] = true
         end
     end
 
     for prop, encoded in pairs(props) do
         if not applied[prop] and prop ~= "Color" then
-            applyOneProperty(instance, prop, encoded, idMap, warnings)
+            applyOneProperty(instance, className, prop, encoded, idMap, warnings)
         end
     end
 
     if props.Color ~= nil then
-        applyOneProperty(instance, "Color", props.Color, idMap, warnings)
+        applyOneProperty(instance, className, "Color", props.Color, idMap, warnings)
     end
 end
 
@@ -151,26 +207,38 @@ function Deserializer.deserialize(blob, parent)
     local idMap = {}
     local created = {}
 
+    precreateMeshParts(blob.instances, idMap, created, warnings)
+
     for id, spec in pairs(blob.instances) do
         if type(spec) ~= "table" then
             destroyCreated(created)
             return nil, "invalid instance spec for " .. tostring(id)
         end
-        local instance = createInstance(spec, warnings)
+        local instance = idMap[id]
+        if not instance then
+            instance = createInstance(spec, warnings)
+            idMap[id] = instance
+            table.insert(created, instance)
+        end
         local name = spec.properties and spec.properties.Name
         if type(name) == "string" then
             pcall(function()
                 instance.Name = name
             end)
         end
-        idMap[id] = instance
-        table.insert(created, instance)
+        applyAttributes(instance, spec.attributes, warnings)
+        applyTags(instance, spec.tags, warnings)
     end
 
     local root = idMap[blob.root]
     if not root then
         destroyCreated(created)
         return nil, "root instance missing from transfer blob"
+    end
+
+    for id, spec in pairs(blob.instances) do
+        local instance = idMap[id]
+        applyProperties(instance, spec.className, spec.properties, idMap, warnings)
     end
 
     for id, spec in pairs(blob.instances) do
@@ -184,13 +252,6 @@ function Deserializer.deserialize(blob, parent)
             return nil, "missing parent reference for " .. tostring(id)
         end
         instance.Parent = targetParent
-    end
-
-    for id, spec in pairs(blob.instances) do
-        local instance = idMap[id]
-        applyProperties(instance, spec.properties, idMap, warnings)
-        applyAttributes(instance, spec.attributes, warnings)
-        applyTags(instance, spec.tags, warnings)
     end
 
     for _, warning in ipairs(blob.warnings or {}) do
