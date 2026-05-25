@@ -1,28 +1,30 @@
-use crate::bridge::auto_spawn::ensure_bridge_running;
 use crate::error::{AppError, AppResult};
-use crate::protocol::messages::{Envelope, ExecRequest};
+use crate::protocol::messages::ExecRequest;
 use std::io::Write;
-use std::time::Duration;
 
-pub fn run(port: u16, studio: Option<String>, lua: String) -> AppResult<()> {
-    ensure_bridge_running(port)?;
-    let url = format!("http://127.0.0.1:{port}/exec");
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(35))
-        .build()?;
-    let resp = client
-        .post(&url)
-        .json(&ExecRequest { studio, lua })
-        .send()
-        .map_err(|source| AppError::BridgeUnreachable {
-            url: url.clone(),
-            source,
-        })?;
-    let env: Envelope<serde_json::Value> = resp.json()?;
-    if !env.ok {
-        return Err(crate::cli::envelope_error("exec", env.error, env.code));
+pub fn run(
+    port: u16,
+    studio: Option<String>,
+    lua: String,
+    allow_dangerous_exec: bool,
+) -> AppResult<()> {
+    if !allow_dangerous_exec {
+        return Err(AppError::Other(
+            "`rs exec` runs arbitrary Luau in Studio. Re-run with --allow-dangerous-exec only for trusted code.".into(),
+        ));
     }
-    print_json(env.data.unwrap_or_else(|| serde_json::json!(null)))?;
+    let value: serde_json::Value = crate::cli::request::post(
+        port,
+        "exec",
+        "/exec",
+        &ExecRequest {
+            studio,
+            lua,
+            allow_dangerous_exec,
+        },
+        35,
+    )?;
+    print_json(value)?;
     Ok(())
 }
 

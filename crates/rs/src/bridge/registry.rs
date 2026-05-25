@@ -96,11 +96,42 @@ impl Registry {
         let map = self.inner.read().await;
 
         if let Some(name) = requested.filter(|name| !name.trim().is_empty()) {
-            if let Some((token, _)) = map.iter().find(|(_, s)| s.id == name) {
-                return Ok(token.clone());
+            let id_matches: Vec<_> = map
+                .iter()
+                .filter(|(_, s)| s.id == name)
+                .map(|(token, s)| (token.clone(), s.clone_info()))
+                .collect();
+            match id_matches.as_slice() {
+                [(token, _)] => return Ok(token.clone()),
+                [] => {}
+                many => {
+                    return Err(AppError::StudioAmbiguous {
+                        name: name.to_string(),
+                        candidates: many
+                            .iter()
+                            .map(|(_, info)| format!("{} ({})", info.name, info.id))
+                            .collect(),
+                    })
+                }
             }
-            if let Some((token, _)) = map.iter().find(|(_, s)| s.name == name) {
-                return Ok(token.clone());
+
+            let exact_name_matches: Vec<_> = map
+                .iter()
+                .filter(|(_, s)| s.name == name)
+                .map(|(token, s)| (token.clone(), s.clone_info()))
+                .collect();
+            match exact_name_matches.as_slice() {
+                [(token, _)] => return Ok(token.clone()),
+                [] => {}
+                many => {
+                    return Err(AppError::StudioAmbiguous {
+                        name: name.to_string(),
+                        candidates: many
+                            .iter()
+                            .map(|(_, info)| format!("{} ({})", info.name, info.id))
+                            .collect(),
+                    })
+                }
             }
 
             let needle = name.to_lowercase();
@@ -337,6 +368,32 @@ mod tests {
             capabilities: vec![],
         })
         .await;
+        let result = reg.resolve_token(Some("Project")).await;
+        assert!(matches!(result, Err(AppError::StudioAmbiguous { .. })));
+    }
+
+    #[tokio::test]
+    async fn resolve_duplicate_exact_name_returns_err() {
+        let reg = Registry::new();
+        reg.register(RegisterRequest {
+            id: "A".into(),
+            name: "Project".into(),
+            place_file_path: None,
+            protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+            plugin_version: Some("0.1.0".into()),
+            capabilities: vec![],
+        })
+        .await;
+        reg.register(RegisterRequest {
+            id: "B".into(),
+            name: "Project".into(),
+            place_file_path: None,
+            protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+            plugin_version: Some("0.1.0".into()),
+            capabilities: vec![],
+        })
+        .await;
+
         let result = reg.resolve_token(Some("Project")).await;
         assert!(matches!(result, Err(AppError::StudioAmbiguous { .. })));
     }

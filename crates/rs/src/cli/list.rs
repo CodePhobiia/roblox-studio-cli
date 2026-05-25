@@ -10,8 +10,8 @@ pub fn run(port: u16, json: bool) -> AppResult<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()?;
-    let resp = client
-        .get(&url)
+    let resp = client.get(&url);
+    let resp = crate::bridge::auth::attach_blocking(resp)?
         .send()
         .map_err(|source| AppError::BridgeUnreachable {
             url: url.clone(),

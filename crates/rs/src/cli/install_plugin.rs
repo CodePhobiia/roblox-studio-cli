@@ -134,8 +134,8 @@ fn fetch_studios(port: u16) -> AppResult<Vec<StudioInfo>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()?;
-    let env: Envelope<Vec<StudioInfo>> = client
-        .get(&url)
+    let request = client.get(&url);
+    let env: Envelope<Vec<StudioInfo>> = crate::bridge::auth::attach_blocking(request)?
         .send()
         .map_err(|source| crate::error::AppError::BridgeUnreachable {
             url: url.clone(),

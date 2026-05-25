@@ -348,6 +348,7 @@ fn exec(port: u16, studio: Option<String>, lua: &str) -> AppResult<serde_json::V
         &ExecRequest {
             studio,
             lua: lua.into(),
+            allow_dangerous_exec: true,
         },
         75,
     )

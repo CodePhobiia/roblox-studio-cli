@@ -9,7 +9,7 @@ A single-binary CLI plus Luau Studio plugin for programmatic Roblox Studio contr
 | `rs list` | Show connected Studios |
 | `rs doctor` | Diagnose bridge, plugin install, connected Studios, and protocol mismatches |
 | `rs install-plugin` | Build, copy, hash-check, and report Studio windows that need restart |
-| `rs exec --studio X --lua "code"` | Run Luau in a Studio and return JSON |
+| `rs exec --studio X --allow-dangerous-exec --lua "code"` | Run trusted Luau in a Studio and return JSON |
 | `rs read --studio X --path Workspace --depth 2` | Read a rich JSON instance tree |
 | `rs export --studio X --path ServerStorage.Foo --out ./export` | Save a subtree as individual local files |
 | `rs import-asset --studio X --file ./mesh.obj --to Workspace` | Convert a local mesh asset into welded MeshParts |
@@ -184,7 +184,7 @@ A single-binary CLI plus Luau Studio plugin for programmatic Roblox Studio contr
 | `rs transfer --from "A:Path" --to "B:ParentPath" --rehost-images --profile targetgroup` | Copy or plan an instance-tree transfer, optionally rehosting image refs |
 | `rs bridge serve/status/stop` | Manage the local bridge daemon |
 
-The bridge listens on `127.0.0.1:7878` by default and can be changed with `--port` or `RS_BRIDGE_PORT`.
+The bridge listens on `127.0.0.1:7878` by default and can be changed with `--port` or `RS_BRIDGE_PORT`. CLI-facing bridge routes require a local token sent by the `rs` binary. Set `RS_BRIDGE_TOKEN` only for trusted local tooling that must call the bridge directly.
 
 ## Build
 
@@ -212,7 +212,7 @@ Restart Studio. The plugin registers with the local bridge and starts polling fo
 
 ```powershell
 rs list
-rs exec --studio "Snipe a Slime!" --lua "return #game.ReplicatedStorage:GetChildren()"
+rs exec --studio "Snipe a Slime!" --allow-dangerous-exec --lua "return #game.ReplicatedStorage:GetChildren()"
 rs read --studio "Snipe a Slime!" --path "Workspace" --depth 1
 rs export --studio "Snipe a Slime!" --path "ServerStorage.SniperSkins" --out ".\exports\snipers"
 rs import-asset --studio "Snipe a Slime!" --file ".\assets\crate.obj" --to "Workspace" --name "Crate"

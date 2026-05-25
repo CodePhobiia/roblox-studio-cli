@@ -54,6 +54,21 @@ fn autopilot_review_request_roundtrips() {
 }
 
 #[test]
+fn exec_request_requires_explicit_dangerous_approval() {
+    let legacy: ExecRequest =
+        serde_json::from_str(r#"{"studio":"Demo","lua":"return 1"}"#).unwrap();
+    assert!(!legacy.allow_dangerous_exec);
+
+    let approved = ExecRequest {
+        studio: Some("Demo".into()),
+        lua: "return 1".into(),
+        allow_dangerous_exec: true,
+    };
+    let value = serde_json::to_value(&approved).unwrap();
+    assert_eq!(value["allowDangerousExec"], true);
+}
+
+#[test]
 fn export_response_roundtrips() {
     let response = ExportResponse {
         root_path: "ServerStorage.SniperSkins".to_string(),

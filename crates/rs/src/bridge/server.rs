@@ -9,7 +9,10 @@ use crate::protocol::messages::{
     RepairToolRequest, SerializeRequest, SnapshotRequest, TransferRequest, UpsertFilesRequest,
     ValidateRequest, CLI_VERSION, PLUGIN_PROTOCOL_VERSION,
 };
-use axum::extract::{Path, State};
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use std::sync::Arc;
@@ -21,6 +24,7 @@ use tracing_subscriber::EnvFilter;
 struct AppState {
     registry: Registry,
     shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    auth_token: Arc<String>,
 }
 
 pub async fn serve(port: u16) -> AppResult<()> {
@@ -29,10 +33,12 @@ pub async fn serve(port: u16) -> AppResult<()> {
         .try_init();
 
     let registry = Registry::new();
+    let auth_token = crate::bridge::auth::load_or_create_token()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let state = AppState {
         registry,
         shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
+        auth_token: Arc::new(auth_token),
     };
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
@@ -47,12 +53,7 @@ pub async fn serve(port: u16) -> AppResult<()> {
 }
 
 fn build_router(state: AppState) -> Router {
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/register", post(register))
-        .route("/poll/:session_token", get(poll))
-        .route("/result/:command_id", post(result))
-        .route("/heartbeat/:session_token", post(heartbeat))
+    let protected = Router::new()
         .route("/studios", get(studios))
         .route("/exec", post(exec))
         .route("/read", post(read))
@@ -76,7 +77,47 @@ fn build_router(state: AppState) -> Router {
         .route("/autopilot-review", post(autopilot_review))
         .route("/transfer", post(transfer))
         .route("/shutdown", post(shutdown))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bridge_auth,
+        ));
+
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/register", post(register))
+        .route("/poll/:session_token", get(poll))
+        .route("/result/:command_id", post(result))
+        .route("/heartbeat/:session_token", post(heartbeat))
+        .merge(protected)
         .with_state(state)
+}
+
+async fn require_bridge_auth(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let authorized = bridge_auth_matches(request.headers(), state.auth_token.as_str());
+
+    if authorized {
+        return next.run(request).await;
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(Envelope::<serde_json::Value>::err(
+            "bridge request missing or invalid auth token; use the rs CLI or set RS_BRIDGE_TOKEN for trusted local tooling",
+            "unauthorized",
+        )),
+    )
+        .into_response()
+}
+
+fn bridge_auth_matches(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get(crate::bridge::auth::TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|token| token == expected)
 }
 
 async fn healthz() -> Json<serde_json::Value> {
@@ -136,11 +177,17 @@ async fn exec(
     State(state): State<AppState>,
     Json(req): Json<ExecRequest>,
 ) -> Json<Envelope<serde_json::Value>> {
+    if !req.allow_dangerous_exec {
+        return Json(Envelope::err(
+            "exec runs arbitrary Luau and requires allowDangerousExec=true",
+            "dangerous-exec-not-approved",
+        ));
+    }
     match run_plugin_command(
         &state.registry,
         req.studio.as_deref(),
         "exec",
-        serde_json::json!({ "lua": req.lua }),
+        serde_json::json!({ "lua": req.lua, "allowDangerousExec": true }),
         30,
     )
     .await
@@ -633,4 +680,23 @@ async fn run_plugin_command(
         ));
     }
     Ok(result.data.unwrap_or_else(|| serde_json::json!(null)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bridge_auth_matches;
+    use crate::bridge::auth::TOKEN_HEADER;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn bridge_auth_matches_expected_token_only() {
+        let mut headers = HeaderMap::new();
+        assert!(!bridge_auth_matches(&headers, "secret"));
+
+        headers.insert(TOKEN_HEADER, HeaderValue::from_static("wrong"));
+        assert!(!bridge_auth_matches(&headers, "secret"));
+
+        headers.insert(TOKEN_HEADER, HeaderValue::from_static("secret"));
+        assert!(bridge_auth_matches(&headers, "secret"));
+    }
 }

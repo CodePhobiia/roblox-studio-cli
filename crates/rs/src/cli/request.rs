@@ -21,15 +21,13 @@ where
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .build()?;
-    let resp =
-        client
-            .post(&url)
-            .json(request)
-            .send()
-            .map_err(|source| AppError::BridgeUnreachable {
-                url: url.clone(),
-                source,
-            })?;
+    let resp = crate::bridge::auth::attach_blocking(client.post(&url))?
+        .json(request)
+        .send()
+        .map_err(|source| AppError::BridgeUnreachable {
+            url: url.clone(),
+            source,
+        })?;
     let env: Envelope<TResp> = resp.json()?;
     if !env.ok {
         return Err(crate::cli::envelope_error(operation, env.error, env.code));

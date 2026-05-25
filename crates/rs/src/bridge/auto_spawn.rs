@@ -33,6 +33,7 @@ fn probe(url: &str) -> bool {
 
 fn spawn_bridge(port: u16) -> AppResult<String> {
     let exe = std::env::current_exe()?;
+    let token = crate::bridge::auth::load_or_create_token()?;
     let log_path = default_log_path();
     let stdout = OpenOptions::new()
         .create(true)
@@ -43,6 +44,7 @@ fn spawn_bridge(port: u16) -> AppResult<String> {
     let mut command = Command::new(&exe);
     command
         .args(["bridge", "serve", "--port", &port.to_string()])
+        .env(crate::bridge::auth::TOKEN_ENV, token)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));

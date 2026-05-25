@@ -104,6 +104,8 @@ pub struct StudioInfo {
 pub struct ExecRequest {
     pub studio: Option<String>,
     pub lua: String,
+    #[serde(default)]
+    pub allow_dangerous_exec: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

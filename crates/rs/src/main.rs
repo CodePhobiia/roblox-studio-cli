@@ -61,6 +61,10 @@ enum Command {
         /// Luau source to execute. Use `return ...` to send a value back.
         #[arg(long)]
         lua: String,
+
+        /// Allow arbitrary Luau execution in Studio for this invocation.
+        #[arg(long)]
+        allow_dangerous_exec: bool,
     },
 
     /// Read a rich instance tree from a Studio session.
@@ -7246,7 +7250,11 @@ fn run() -> AppResult<()> {
             json || format.is_some_and(|value| value.is_json()),
         ),
         Command::InstallPlugin { watch, json } => cli::install_plugin::run(args.port, watch, json),
-        Command::Exec { studio, lua } => cli::exec::run(args.port, studio, lua),
+        Command::Exec {
+            studio,
+            lua,
+            allow_dangerous_exec,
+        } => cli::exec::run(args.port, studio, lua, allow_dangerous_exec),
         Command::Read {
             studio,
             path,

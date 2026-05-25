@@ -1,6 +1,10 @@
 local Encoders = require(script.Parent.Parent.PropertyEncoders)
 
 local function execHandler(payload)
+    if payload.allowDangerousExec ~= true then
+        return { ok = false, error = "exec requires allowDangerousExec=true" }
+    end
+
     if type(payload.lua) ~= "string" then
         return { ok = false, error = "lua payload missing" }
     end

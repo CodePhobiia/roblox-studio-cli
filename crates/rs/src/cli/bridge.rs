@@ -25,7 +25,10 @@ pub fn status(port: u16, json: bool) -> AppResult<()> {
     }
 
     let studios_url = format!("http://127.0.0.1:{port}/studios");
-    let env: Envelope<Vec<StudioInfo>> = client.get(&studios_url).send()?.json()?;
+    let env: Envelope<Vec<StudioInfo>> =
+        crate::bridge::auth::attach_blocking(client.get(&studios_url))?
+            .send()?
+            .json()?;
     if !env.ok {
         return Err(crate::cli::envelope_error(
             "bridge status",
@@ -49,8 +52,8 @@ pub fn stop(port: u16) -> AppResult<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()?;
-    let resp = client
-        .post(&url)
+    let resp = client.post(&url);
+    let resp = crate::bridge::auth::attach_blocking(resp)?
         .send()
         .map_err(|source| AppError::BridgeUnreachable {
             url: url.clone(),

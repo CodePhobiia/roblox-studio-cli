@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod auto_spawn;
 pub mod orchestrator;
 pub mod registry;
