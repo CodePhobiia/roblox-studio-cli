@@ -2,14 +2,57 @@ local HttpService = game:GetService("HttpService")
 local Config = require(script.Parent.Config)
 local Http = require(script.Parent.Http)
 local Dispatch = require(script.Parent.Dispatch)
+local AutopilotReview = require(script.Parent.AutopilotReview)
+
+local PROTOCOL_VERSION = 5
+local PLUGIN_VERSION = "0.4.0"
+local CAPABILITIES = {
+    "exec",
+    "read",
+    "export",
+    "importAsset",
+    "importImage",
+    "importUploaded",
+    "importUiPack",
+    "importAudio",
+    "validate",
+    "repairTool",
+    "snapshot",
+    "create",
+    "upsertFiles",
+    "applyPlan",
+    "packageUpdate",
+    "history",
+    "deps",
+    "serialize",
+    "deserialize",
+    "autopilotReview"
+}
 
 Dispatch.register("exec", require(script.Parent.Handlers.Exec))
 Dispatch.register("read", require(script.Parent.Handlers.Read))
 Dispatch.register("export", require(script.Parent.Handlers.Export))
 Dispatch.register("importAsset", require(script.Parent.Handlers.ImportAsset))
 Dispatch.register("importImage", require(script.Parent.Handlers.ImportImage))
+Dispatch.register("importUploaded", require(script.Parent.Handlers.ImportUploaded))
+Dispatch.register("importUiPack", require(script.Parent.Handlers.ImportUiPack))
+Dispatch.register("importAudio", require(script.Parent.Handlers.ImportAudio))
+Dispatch.register("validate", require(script.Parent.Handlers.Validate))
+Dispatch.register("repairTool", require(script.Parent.Handlers.RepairTool))
+Dispatch.register("snapshot", require(script.Parent.Handlers.Snapshot))
+Dispatch.register("create", require(script.Parent.Handlers.Create))
+Dispatch.register("upsertFiles", require(script.Parent.Handlers.UpsertFiles))
+Dispatch.register("applyPlan", require(script.Parent.Handlers.ApplyPlan))
+Dispatch.register("packageUpdate", require(script.Parent.Handlers.PackageUpdate))
+Dispatch.register("history", require(script.Parent.Handlers.History))
+Dispatch.register("deps", require(script.Parent.Handlers.Deps))
 Dispatch.register("serialize", require(script.Parent.Handlers.Serialize))
 Dispatch.register("deserialize", require(script.Parent.Handlers.Deserialize))
+Dispatch.register("autopilotReview", AutopilotReview.handle)
+
+pcall(function()
+    AutopilotReview.setup(plugin)
+end)
 
 local studioId = HttpService:GenerateGUID(false)
 local sessionToken = nil
@@ -40,7 +83,10 @@ local function register()
     local response, err = Http.post(Config.bridgeUrl .. "/register", {
         id = studioId,
         name = game.Name,
-        placeFilePath = getPlaceFilePath()
+        placeFilePath = getPlaceFilePath(),
+        protocolVersion = PROTOCOL_VERSION,
+        pluginVersion = PLUGIN_VERSION,
+        capabilities = CAPABILITIES
     })
     if not response then
         warn("[rs-bridge-plugin] register failed: " .. tostring(err))

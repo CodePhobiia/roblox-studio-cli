@@ -46,6 +46,7 @@ pub fn run(
             position_x,
             position_y,
             pixels_base64: encode_base64(&image.rgba),
+            source_id: None,
         })
         .send()
         .map_err(|source| AppError::BridgeUnreachable {
@@ -87,14 +88,14 @@ pub fn run(
     Ok(())
 }
 
-struct PngImage {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
-    warnings: Vec<String>,
+pub(crate) struct PngImage {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) rgba: Vec<u8>,
+    pub(crate) warnings: Vec<String>,
 }
 
-fn file_stem(path: &Path) -> String {
+pub(crate) fn file_stem(path: &Path) -> String {
     path.file_stem()
         .and_then(|value| value.to_str())
         .filter(|value| !value.trim().is_empty())
@@ -102,7 +103,7 @@ fn file_stem(path: &Path) -> String {
         .to_string()
 }
 
-fn load_png(path: &Path) -> AppResult<PngImage> {
+pub(crate) fn load_png(path: &Path) -> AppResult<PngImage> {
     let file = File::open(path)?;
     let mut decoder = png::Decoder::new(BufReader::new(file));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
@@ -203,7 +204,7 @@ fn resize_nearest(
     Ok(out)
 }
 
-fn parse_size(value: &str) -> AppResult<(u32, u32)> {
+pub(crate) fn parse_size(value: &str) -> AppResult<(u32, u32)> {
     let (w, h) = value
         .split_once('x')
         .or_else(|| value.split_once('X'))
@@ -213,7 +214,7 @@ fn parse_size(value: &str) -> AppResult<(u32, u32)> {
     Ok((width, height))
 }
 
-fn parse_position(value: &str) -> AppResult<(i32, i32)> {
+pub(crate) fn parse_position(value: &str) -> AppResult<(i32, i32)> {
     let (x, y) = value
         .split_once(',')
         .ok_or_else(|| AppError::Other("--position must look like 0,0".into()))?;
@@ -241,7 +242,7 @@ fn parse_positive_u32(value: &str, label: &str) -> AppResult<u32> {
     Ok(parsed)
 }
 
-fn encode_base64(bytes: &[u8]) -> String {
+pub(crate) fn encode_base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {

@@ -17,6 +17,7 @@ pub fn run(
     scale: f32,
     anchored: bool,
     weld: bool,
+    texture_root: Option<PathBuf>,
 ) -> AppResult<()> {
     if !scale.is_finite() || scale <= 0.0 {
         return Err(AppError::Other(
@@ -25,7 +26,8 @@ pub fn run(
     }
 
     let import_name = name.unwrap_or_else(|| file_stem(&file));
-    let meshes = load_mesh_file(&file, scale)?;
+    let texture_resolver = TextureResolver::load(texture_root.as_deref())?;
+    let meshes = load_mesh_file(&file, scale, &texture_resolver)?;
     if meshes.is_empty() {
         return Err(AppError::Other(
             "asset contained no importable meshes".into(),
@@ -46,6 +48,7 @@ pub fn run(
             meshes,
             anchored,
             weld,
+            source_id: None,
         })
         .send()
         .map_err(|source| AppError::BridgeUnreachable {
@@ -93,17 +96,21 @@ fn file_stem(path: &Path) -> String {
         .to_string()
 }
 
-fn load_mesh_file(path: &Path, scale: f32) -> AppResult<Vec<ImportMesh>> {
+fn load_mesh_file(
+    path: &Path,
+    scale: f32,
+    texture_resolver: &TextureResolver,
+) -> AppResult<Vec<ImportMesh>> {
     let ext = path
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
     match ext.as_str() {
-        "obj" => parse_obj(&fs::read_to_string(path)?, &file_stem(path), scale),
+        "obj" => parse_obj_file(path, scale, texture_resolver),
         "stl" => parse_stl(&fs::read(path)?, &file_stem(path), scale),
-        "glb" => parse_glb(&fs::read(path)?, &file_stem(path), scale),
-        "gltf" => parse_gltf(path, scale),
+        "glb" => parse_glb(&fs::read(path)?, &file_stem(path), scale, texture_resolver),
+        "gltf" => parse_gltf(path, scale, texture_resolver),
         _ => parse_with_blender(path, scale).map_err(|err| {
             AppError::Other(format!(
                 "unsupported native format '.{ext}', and Blender conversion failed: {err}"
@@ -153,7 +160,12 @@ fn parse_with_blender(path: &Path, scale: f32) -> AppResult<Vec<ImportMesh>> {
         )));
     }
 
-    let meshes = parse_glb(&fs::read(&out_path)?, &file_stem(path), scale)?;
+    let meshes = parse_glb(
+        &fs::read(&out_path)?,
+        &file_stem(path),
+        scale,
+        &TextureResolver::default(),
+    )?;
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(&out_path);
     let _ = fs::remove_dir(&work_dir);
@@ -295,14 +307,89 @@ fn tail(value: &str, max_lines: usize) -> String {
 struct RawObjMesh {
     name: String,
     triangles: Vec<[usize; 3]>,
+    material_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ObjMaterial {
+    color: Option<[f32; 3]>,
+    texture_uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TextureResolver {
+    root: Option<PathBuf>,
+    map: BTreeMap<String, String>,
+}
+
+impl TextureResolver {
+    fn load(root: Option<&Path>) -> AppResult<Self> {
+        let Some(root) = root else {
+            return Ok(Self::default());
+        };
+        let manifest = root.join("rs-textures.json");
+        let map = if manifest.exists() {
+            serde_json::from_str(&fs::read_to_string(manifest)?)?
+        } else {
+            BTreeMap::new()
+        };
+        Ok(Self {
+            root: Some(root.to_path_buf()),
+            map,
+        })
+    }
+
+    fn resolve(&self, texture: &str, base: &Path) -> String {
+        if let Some(mapped) = self.map.get(texture).or_else(|| {
+            Path::new(texture)
+                .file_name()
+                .and_then(|v| v.to_str())
+                .and_then(|name| self.map.get(name))
+        }) {
+            return mapped.clone();
+        }
+        if let Some(root) = &self.root {
+            let name = Path::new(texture)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(texture);
+            let candidate = root.join(name);
+            if candidate.exists() {
+                return candidate.to_string_lossy().replace('\\', "/");
+            }
+        }
+        base.join(texture).to_string_lossy().replace('\\', "/")
+    }
+}
+
+fn parse_obj_file(
+    path: &Path,
+    scale: f32,
+    texture_resolver: &TextureResolver,
+) -> AppResult<Vec<ImportMesh>> {
+    let source = fs::read_to_string(path)?;
+    let materials = load_obj_materials(path, &source, texture_resolver)?;
+    parse_obj_with_materials(&source, &file_stem(path), scale, &materials)
+}
+
+#[cfg(test)]
 fn parse_obj(source: &str, fallback_name: &str, scale: f32) -> AppResult<Vec<ImportMesh>> {
+    parse_obj_with_materials(source, fallback_name, scale, &BTreeMap::new())
+}
+
+fn parse_obj_with_materials(
+    source: &str,
+    fallback_name: &str,
+    scale: f32,
+    materials: &BTreeMap<String, ObjMaterial>,
+) -> AppResult<Vec<ImportMesh>> {
     let mut vertices = Vec::<[f32; 3]>::new();
     let mut meshes = Vec::<RawObjMesh>::new();
+    let mut current_material: Option<String> = None;
     let mut current = RawObjMesh {
         name: fallback_name.to_string(),
         triangles: Vec::new(),
+        material_name: None,
     };
 
     for (line_index, line) in source.lines().enumerate() {
@@ -336,8 +423,25 @@ fn parse_obj(source: &str, fallback_name: &str, scale: f32) -> AppResult<Vec<Imp
                     current = RawObjMesh {
                         name: next_name,
                         triangles: Vec::new(),
+                        material_name: current_material.clone(),
                     };
                 }
+            }
+            "usemtl" => {
+                let next_material = parts.collect::<Vec<_>>().join(" ");
+                let next_material = (!next_material.trim().is_empty()).then_some(next_material);
+                if !current.triangles.is_empty() && current.material_name != next_material {
+                    meshes.push(current);
+                    let suffix = next_material.as_deref().unwrap_or("material");
+                    current = RawObjMesh {
+                        name: format!("{fallback_name}_{suffix}"),
+                        triangles: Vec::new(),
+                        material_name: next_material.clone(),
+                    };
+                } else {
+                    current.material_name = next_material.clone();
+                }
+                current_material = next_material;
             }
             "f" => {
                 let indices = parts
@@ -363,8 +467,97 @@ fn parse_obj(source: &str, fallback_name: &str, scale: f32) -> AppResult<Vec<Imp
     }
     meshes
         .into_iter()
-        .map(|mesh| build_mesh(mesh.name, &vertices, &mesh.triangles, scale))
+        .map(|mesh| {
+            let material = mesh
+                .material_name
+                .as_ref()
+                .and_then(|name| materials.get(name));
+            build_mesh(
+                mesh.name.clone(),
+                &vertices,
+                &mesh.triangles,
+                scale,
+                mesh.material_name.clone(),
+                material.and_then(|value| value.texture_uri.clone()),
+                material.and_then(|value| value.color),
+                Some(mesh.name),
+                None,
+            )
+        })
         .collect()
+}
+
+fn load_obj_materials(
+    path: &Path,
+    source: &str,
+    texture_resolver: &TextureResolver,
+) -> AppResult<BTreeMap<String, ObjMaterial>> {
+    let mut materials = BTreeMap::new();
+    for line in source.lines() {
+        let line = line.trim();
+        if !line.starts_with("mtllib ") {
+            continue;
+        }
+        let name = line.trim_start_matches("mtllib").trim();
+        if name.is_empty() {
+            continue;
+        }
+        let mtl_path = path.parent().unwrap_or_else(|| Path::new(".")).join(name);
+        if mtl_path.exists() {
+            materials.extend(parse_mtl(
+                &fs::read_to_string(&mtl_path)?,
+                mtl_path.parent().unwrap_or_else(|| Path::new(".")),
+                texture_resolver,
+            )?);
+        }
+    }
+    Ok(materials)
+}
+
+fn parse_mtl(
+    source: &str,
+    base: &Path,
+    texture_resolver: &TextureResolver,
+) -> AppResult<BTreeMap<String, ObjMaterial>> {
+    let mut materials = BTreeMap::<String, ObjMaterial>::new();
+    let mut current: Option<String> = None;
+    for line in source.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        match parts.next() {
+            Some("newmtl") => {
+                let name = parts.collect::<Vec<_>>().join(" ");
+                if !name.is_empty() {
+                    materials.entry(name.clone()).or_default();
+                    current = Some(name);
+                }
+            }
+            Some("Kd") => {
+                if let Some(name) = &current {
+                    let color = [
+                        parse_f32(parts.next(), 0, "Kd.r")?,
+                        parse_f32(parts.next(), 0, "Kd.g")?,
+                        parse_f32(parts.next(), 0, "Kd.b")?,
+                    ];
+                    materials.entry(name.clone()).or_default().color = Some(color);
+                }
+            }
+            Some("map_Kd") => {
+                if let Some(name) = &current {
+                    let texture = parts.collect::<Vec<_>>().join(" ");
+                    if !texture.is_empty() {
+                        materials.entry(name.clone()).or_default().texture_uri =
+                            Some(texture_resolver.resolve(&texture, base));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(materials)
 }
 
 fn parse_f32(value: Option<&str>, line_no: usize, component: &str) -> AppResult<f32> {
@@ -407,6 +600,11 @@ fn build_mesh(
     source_vertices: &[[f32; 3]],
     source_triangles: &[[usize; 3]],
     scale: f32,
+    material_name: Option<String>,
+    texture_uri: Option<String>,
+    color: Option<[f32; 3]>,
+    hierarchy_path: Option<String>,
+    source_pivot: Option<[f32; 3]>,
 ) -> AppResult<ImportMesh> {
     let mut remap = BTreeMap::<usize, usize>::new();
     let mut vertices = Vec::<[f32; 3]>::new();
@@ -430,6 +628,11 @@ fn build_mesh(
         name,
         vertices,
         triangles,
+        material_name,
+        texture_uri,
+        color,
+        hierarchy_path,
+        source_pivot,
     })
 }
 
@@ -477,6 +680,11 @@ fn parse_binary_stl(bytes: &[u8], fallback_name: &str, scale: f32) -> AppResult<
         name: fallback_name.to_string(),
         vertices,
         triangles,
+        material_name: None,
+        texture_uri: None,
+        color: None,
+        hierarchy_path: Some(fallback_name.to_string()),
+        source_pivot: None,
     })
 }
 
@@ -523,6 +731,11 @@ fn parse_ascii_stl(bytes: &[u8], fallback_name: &str, scale: f32) -> AppResult<I
         name: fallback_name.to_string(),
         vertices,
         triangles,
+        material_name: None,
+        texture_uri: None,
+        color: None,
+        hierarchy_path: Some(fallback_name.to_string()),
+        source_pivot: None,
     })
 }
 
@@ -556,6 +769,10 @@ impl Mat4 {
             self.0[2] * x + self.0[6] * y + self.0[10] * z + self.0[14],
         ]
     }
+
+    fn translation(self) -> [f32; 3] {
+        [self.0[12], self.0[13], self.0[14]]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -566,7 +783,12 @@ struct GltfBufferView {
     byte_stride: Option<usize>,
 }
 
-fn parse_glb(bytes: &[u8], fallback_name: &str, scale: f32) -> AppResult<Vec<ImportMesh>> {
+fn parse_glb(
+    bytes: &[u8],
+    fallback_name: &str,
+    scale: f32,
+    texture_resolver: &TextureResolver,
+) -> AppResult<Vec<ImportMesh>> {
     if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
         return Err(AppError::Other("invalid GLB header".into()));
     }
@@ -615,14 +837,24 @@ fn parse_glb(bytes: &[u8], fallback_name: &str, scale: f32) -> AppResult<Vec<Imp
     let json = json.ok_or_else(|| AppError::Other("GLB missing JSON chunk".into()))?;
     let document: serde_json::Value = serde_json::from_slice(&json)?;
     let buffers = vec![bin.unwrap_or_default()];
-    parse_gltf_document(&document, buffers, fallback_name, scale)
+    parse_gltf_document(&document, buffers, fallback_name, scale, texture_resolver)
 }
 
-fn parse_gltf(path: &Path, scale: f32) -> AppResult<Vec<ImportMesh>> {
+fn parse_gltf(
+    path: &Path,
+    scale: f32,
+    texture_resolver: &TextureResolver,
+) -> AppResult<Vec<ImportMesh>> {
     let document: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let buffers = load_gltf_buffers(&document, parent)?;
-    parse_gltf_document(&document, buffers, &file_stem(path), scale)
+    parse_gltf_document(
+        &document,
+        buffers,
+        &file_stem(path),
+        scale,
+        texture_resolver,
+    )
 }
 
 fn load_gltf_buffers(document: &serde_json::Value, parent: &Path) -> AppResult<Vec<Vec<u8>>> {
@@ -661,6 +893,7 @@ fn parse_gltf_document(
     buffers: Vec<Vec<u8>>,
     fallback_name: &str,
     scale: f32,
+    texture_resolver: &TextureResolver,
 ) -> AppResult<Vec<ImportMesh>> {
     let buffer_views = parse_gltf_buffer_views(document)?;
     let meshes = document
@@ -680,8 +913,10 @@ fn parse_gltf_document(
                 nodes,
                 node_index,
                 Mat4::identity(),
+                "",
                 fallback_name,
                 scale,
+                texture_resolver,
                 &mut imported,
             )?;
         }
@@ -695,8 +930,10 @@ fn parse_gltf_document(
                 mesh_index,
                 None,
                 Mat4::identity(),
+                None,
                 fallback_name,
                 scale,
+                texture_resolver,
                 &mut imported,
             )?;
         }
@@ -743,13 +980,25 @@ fn append_gltf_node(
     nodes: &[serde_json::Value],
     node_index: usize,
     parent_transform: Mat4,
+    parent_path: &str,
     fallback_name: &str,
     scale: f32,
+    texture_resolver: &TextureResolver,
     imported: &mut Vec<ImportMesh>,
 ) -> AppResult<()> {
     let node = nodes
         .get(node_index)
         .ok_or_else(|| AppError::Other(format!("glTF node {node_index} not found")))?;
+    let node_label = node
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("node_{node_index}"));
+    let node_path = if parent_path.is_empty() {
+        node_label.clone()
+    } else {
+        format!("{parent_path}/{node_label}")
+    };
     let transform = parent_transform.mul(gltf_node_transform(node)?);
     if let Some(mesh_index) = node.get("mesh").and_then(|value| value.as_u64()) {
         let node_name = node.get("name").and_then(|value| value.as_str());
@@ -761,8 +1010,10 @@ fn append_gltf_node(
             mesh_index as usize,
             node_name,
             transform,
+            Some(&node_path),
             fallback_name,
             scale,
+            texture_resolver,
             imported,
         )?;
     }
@@ -778,8 +1029,10 @@ fn append_gltf_node(
                     nodes,
                     child_index as usize,
                     transform,
+                    &node_path,
                     fallback_name,
                     scale,
+                    texture_resolver,
                     imported,
                 )?;
             }
@@ -797,8 +1050,10 @@ fn append_gltf_mesh(
     mesh_index: usize,
     node_name: Option<&str>,
     transform: Mat4,
+    node_path: Option<&str>,
     fallback_name: &str,
     scale: f32,
+    texture_resolver: &TextureResolver,
     imported: &mut Vec<ImportMesh>,
 ) -> AppResult<()> {
     let mesh = meshes
@@ -847,13 +1102,85 @@ fn append_gltf_mesh(
         } else {
             format!("{mesh_name}_{primitive_index}")
         };
+        let (material_name, color, texture_uri) =
+            gltf_primitive_material(document, primitive, texture_resolver);
         imported.push(ImportMesh {
             name,
             vertices,
             triangles,
+            material_name,
+            texture_uri,
+            color,
+            hierarchy_path: node_path.map(|path| {
+                if primitives.len() == 1 {
+                    path.to_string()
+                } else {
+                    format!("{path}/{primitive_index}")
+                }
+            }),
+            source_pivot: Some(transform.translation()),
         });
     }
     Ok(())
+}
+
+fn gltf_primitive_material(
+    document: &serde_json::Value,
+    primitive: &serde_json::Value,
+    texture_resolver: &TextureResolver,
+) -> (Option<String>, Option<[f32; 3]>, Option<String>) {
+    let Some(material_index) = primitive.get("material").and_then(|value| value.as_u64()) else {
+        return (None, None, None);
+    };
+    let Some(material) = document
+        .get("materials")
+        .and_then(|value| value.as_array())
+        .and_then(|materials| materials.get(material_index as usize))
+    else {
+        return (None, None, None);
+    };
+    let material_name = material
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned);
+    let pbr = material.get("pbrMetallicRoughness");
+    let color = pbr
+        .and_then(|value| value.get("baseColorFactor"))
+        .and_then(|value| value.as_array())
+        .and_then(|values| {
+            if values.len() >= 3 {
+                Some([
+                    values[0].as_f64()? as f32,
+                    values[1].as_f64()? as f32,
+                    values[2].as_f64()? as f32,
+                ])
+            } else {
+                None
+            }
+        });
+    let texture_uri = pbr
+        .and_then(|value| value.get("baseColorTexture"))
+        .and_then(|value| value.get("index"))
+        .and_then(|value| value.as_u64())
+        .and_then(|texture_index| gltf_texture_uri(document, texture_index as usize))
+        .map(|uri| texture_resolver.resolve(&uri, Path::new(".")));
+    (material_name, color, texture_uri)
+}
+
+fn gltf_texture_uri(document: &serde_json::Value, texture_index: usize) -> Option<String> {
+    let source_index = document
+        .get("textures")?
+        .as_array()?
+        .get(texture_index)?
+        .get("source")?
+        .as_u64()? as usize;
+    document
+        .get("images")?
+        .as_array()?
+        .get(source_index)?
+        .get("uri")?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 fn gltf_node_transform(node: &serde_json::Value) -> AppResult<Mat4> {
@@ -1197,7 +1524,7 @@ fn decode_base64(input: &str) -> AppResult<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_gltf_document, parse_obj, parse_stl};
+    use super::{parse_gltf_document, parse_obj, parse_stl, TextureResolver};
 
     #[test]
     fn obj_quad_triangulates() {
@@ -1277,7 +1604,14 @@ endsolid tri
                 }]
             }]
         });
-        let meshes = parse_gltf_document(&document, vec![buffer], "asset", 1.0).unwrap();
+        let meshes = parse_gltf_document(
+            &document,
+            vec![buffer],
+            "asset",
+            1.0,
+            &TextureResolver::default(),
+        )
+        .unwrap();
         assert_eq!(meshes.len(), 1);
         assert_eq!(meshes[0].name, "Tri");
         assert_eq!(meshes[0].vertices.len(), 3);
@@ -1304,7 +1638,14 @@ endsolid tri
             "scenes": [{ "nodes": [0] }],
             "scene": 0
         });
-        let meshes = parse_gltf_document(&document, vec![buffer], "asset", 1.0).unwrap();
+        let meshes = parse_gltf_document(
+            &document,
+            vec![buffer],
+            "asset",
+            1.0,
+            &TextureResolver::default(),
+        )
+        .unwrap();
         assert_eq!(meshes[0].name, "Moved");
         assert_eq!(meshes[0].vertices[0], [2.0, 3.0, 4.0]);
         assert_eq!(meshes[0].vertices[1], [3.0, 3.0, 4.0]);

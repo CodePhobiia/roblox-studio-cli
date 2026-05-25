@@ -1,0 +1,6 @@
+{
+  "kind": "collectibleCoin",
+  "name": "Coins",
+  "currencyName": "Coins",
+  "coinValue": 1
+}

@@ -9,7 +9,7 @@ pub enum AppError {
         source: reqwest::Error,
     },
 
-    #[error("couldn't start rs-bridge on port {port} within 3s. Check {log_path} for details.")]
+    #[error("couldn't start rs-bridge on port {port} within 8s. Check {log_path} for details.")]
     BridgeStartFailed { port: u16, log_path: String },
 
     #[error("studio '{name}' is not registered with the bridge. Open Studio and verify the plugin is installed.")]
@@ -23,6 +23,13 @@ pub enum AppError {
 
     #[error("plugin error: {0}")]
     PluginError(String),
+
+    #[error("plugin protocol mismatch for studio '{studio}': plugin has {actual}, CLI expects {expected}. Restart Studio after installing the rebuilt rs plugin.")]
+    PluginProtocolMismatch {
+        studio: String,
+        expected: u32,
+        actual: String,
+    },
 
     #[error("command timed out after {timeout_ms}ms")]
     CommandTimeout { timeout_ms: u64 },
@@ -45,19 +52,23 @@ pub enum AppError {
 
     #[error("{0}")]
     Other(String),
+
+    #[error("{message}")]
+    Silent { exit_code: i32, message: String },
 }
 
 impl AppError {
     pub fn exit_code(&self) -> i32 {
         match self {
+            AppError::Silent { exit_code, .. } => *exit_code,
             AppError::BridgeUnreachable { .. } | AppError::BridgeStartFailed { .. } => 2,
             AppError::StudioNotConnected { .. } | AppError::StudioAmbiguous { .. } => 3,
-            AppError::PluginError(_) => 4,
+            AppError::PluginError(_) | AppError::PluginProtocolMismatch { .. } => 4,
             AppError::CommandTimeout { .. } => 5,
             AppError::BridgeResponse { code, .. } => match code.as_str() {
                 "bridge-unreachable" => 2,
                 "studio-not-found" | "studio-ambiguous" => 3,
-                "plugin-error" => 4,
+                "plugin-error" | "plugin-protocol-mismatch" => 4,
                 "bridge-unresponsive" | "command-timeout" => 5,
                 _ => 1,
             },
@@ -73,6 +84,7 @@ impl AppError {
             AppError::StudioNotConnected { .. } => "studio-not-found",
             AppError::StudioAmbiguous { .. } => "studio-ambiguous",
             AppError::PluginError(_) => "plugin-error",
+            AppError::PluginProtocolMismatch { .. } => "plugin-protocol-mismatch",
             AppError::CommandTimeout { .. } => "command-timeout",
             AppError::BridgeResponse { code, .. } => match code.as_str() {
                 "bridge-unreachable" => "bridge-unreachable",
@@ -86,8 +98,13 @@ impl AppError {
             AppError::Serde(_) => "bad-json",
             AppError::Io(_) => "io",
             AppError::Http(_) => "http",
+            AppError::Silent { .. } => "internal",
             AppError::Other(_) => "internal",
         }
+    }
+
+    pub fn is_silent(&self) -> bool {
+        matches!(self, AppError::Silent { .. })
     }
 }
 

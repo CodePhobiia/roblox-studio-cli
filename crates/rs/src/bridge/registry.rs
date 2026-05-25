@@ -13,6 +13,9 @@ pub struct StudioSession {
     pub id: String,
     pub name: String,
     pub place_file_path: Option<String>,
+    pub protocol_version: Option<u32>,
+    pub plugin_version: Option<String>,
+    pub capabilities: Vec<String>,
     pub last_heartbeat: Instant,
     pub pending_commands: VecDeque<PluginCommand>,
     pub pending_results: HashMap<String, oneshot::Sender<CommandResult>>,
@@ -42,6 +45,9 @@ impl Registry {
                 id: req.id,
                 name: req.name,
                 place_file_path: req.place_file_path,
+                protocol_version: req.protocol_version,
+                plugin_version: req.plugin_version,
+                capabilities: req.capabilities,
                 last_heartbeat: Instant::now(),
                 pending_commands: VecDeque::new(),
                 pending_results: HashMap::new(),
@@ -75,6 +81,9 @@ impl Registry {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 place_file_path: s.place_file_path.clone(),
+                protocol_version: s.protocol_version,
+                plugin_version: s.plugin_version.clone(),
+                capabilities: s.capabilities.clone(),
                 last_heartbeat_ms_ago: now.duration_since(s.last_heartbeat).as_millis() as u64,
             })
             .collect();
@@ -159,6 +168,27 @@ impl Registry {
         Ok(rx)
     }
 
+    pub async fn ensure_protocol(&self, session_token: &str, expected: u32) -> AppResult<()> {
+        self.expire_stale().await;
+        let map = self.inner.read().await;
+        let session = map
+            .get(session_token)
+            .ok_or_else(|| AppError::StudioNotConnected {
+                name: session_token.to_string(),
+            })?;
+        if session.protocol_version == Some(expected) {
+            return Ok(());
+        }
+        Err(AppError::PluginProtocolMismatch {
+            studio: session.name.clone(),
+            expected,
+            actual: session
+                .protocol_version
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        })
+    }
+
     pub async fn poll(
         &self,
         session_token: &str,
@@ -216,6 +246,9 @@ impl StudioSession {
             id: self.id.clone(),
             name: self.name.clone(),
             place_file_path: self.place_file_path.clone(),
+            protocol_version: self.protocol_version,
+            plugin_version: self.plugin_version.clone(),
+            capabilities: self.capabilities.clone(),
             last_heartbeat_ms_ago: Instant::now()
                 .duration_since(self.last_heartbeat)
                 .as_millis() as u64,
@@ -236,6 +269,9 @@ mod tests {
                 id: "stud-A".into(),
                 name: "Snipe a Slime!".into(),
                 place_file_path: None,
+                protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+                plugin_version: Some("0.1.0".into()),
+                capabilities: vec![],
             })
             .await;
 
@@ -254,6 +290,9 @@ mod tests {
                 id: "stud-A".into(),
                 name: "Snipe a Slime!".into(),
                 place_file_path: None,
+                protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+                plugin_version: Some("0.1.0".into()),
+                capabilities: vec![],
             })
             .await;
         let resolved = reg.resolve_token(Some("Snipe a Slime!")).await.unwrap();
@@ -268,6 +307,9 @@ mod tests {
                 id: "stud-A".into(),
                 name: "Snipe a Slime!".into(),
                 place_file_path: None,
+                protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+                plugin_version: Some("0.1.0".into()),
+                capabilities: vec![],
             })
             .await;
         let resolved = reg.resolve_token(Some("slime")).await.unwrap();
@@ -281,12 +323,18 @@ mod tests {
             id: "A".into(),
             name: "Project Alpha".into(),
             place_file_path: None,
+            protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+            plugin_version: Some("0.1.0".into()),
+            capabilities: vec![],
         })
         .await;
         reg.register(RegisterRequest {
             id: "B".into(),
             name: "Project Beta".into(),
             place_file_path: None,
+            protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+            plugin_version: Some("0.1.0".into()),
+            capabilities: vec![],
         })
         .await;
         let result = reg.resolve_token(Some("Project")).await;
@@ -301,6 +349,9 @@ mod tests {
                 id: "A".into(),
                 name: "Project".into(),
                 place_file_path: None,
+                protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+                plugin_version: Some("0.1.0".into()),
+                capabilities: vec![],
             })
             .await;
         let rx = reg

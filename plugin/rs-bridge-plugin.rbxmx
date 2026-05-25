@@ -5,6 +5,556 @@
     </Properties>
     <Item class="ModuleScript" referent="1">
       <Properties>
+        <string name="Name">AuditLog</string>
+        <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
+local ServerStorage = game:GetService("ServerStorage")
+local Deserializer = require(script.Parent.Deserializer)
+
+local AuditLog = {}
+
+local MAX_RECORDS = 50
+local FOLDER_NAME = "rsCommandHistory"
+
+local function folder()
+    local existing = ServerStorage:FindFirstChild(FOLDER_NAME)
+    if existing and existing:IsA("Folder") then
+        return existing
+    end
+    local created = Instance.new("Folder")
+    created.Name = FOLDER_NAME
+    created.Parent = ServerStorage
+    return created
+end
+
+local function nowIso()
+    return DateTime.now():ToIsoDate()
+end
+
+local function nowUnix()
+    return DateTime.now().UnixTimestampMillis
+end
+
+local function decodeRecord(value)
+    if not value or not value:IsA("StringValue") then
+        return nil
+    end
+    local ok, decoded = pcall(function()
+        return HttpService:JSONDecode(value.Value)
+    end)
+    if ok and type(decoded) == "table" then
+        return decoded
+    end
+    return nil
+end
+
+local function encodeRecord(record)
+    local ok, encoded = pcall(function()
+        return HttpService:JSONEncode(record)
+    end)
+    if ok then
+        return encoded
+    end
+    return "{}"
+end
+
+local function trim(logFolder)
+    local values = {}
+    for _, child in ipairs(logFolder:GetChildren()) do
+        if child:IsA("StringValue") then
+            table.insert(values, child)
+        end
+    end
+    table.sort(values, function(a, b)
+        return (a:GetAttribute("createdUnix") or 0) > (b:GetAttribute("createdUnix") or 0)
+    end)
+    for index = MAX_RECORDS + 1, #values do
+        values[index]:Destroy()
+    end
+end
+
+local function dataFrom(result)
+    if type(result) == "table" and type(result.data) == "table" then
+        return result.data
+    end
+    return {}
+end
+
+local function collectPaths(data)
+    local paths = {}
+    if type(data.changedPaths) == "table" then
+        for _, path in ipairs(data.changedPaths) do
+            table.insert(paths, tostring(path))
+        end
+    end
+    for _, key in ipairs({ "rootPath", "path", "parentPath", "guiPath", "instancePath" }) do
+        if type(data[key]) == "string" then
+            table.insert(paths, data[key])
+        end
+    end
+    return paths
+end
+
+function AuditLog.record(command, result)
+    local data = dataFrom(result)
+    local meta = type(command.payload) == "table" and command.payload._rs or {}
+    local record = {
+        commandId = tostring(command.commandId or HttpService:GenerateGUID(false)),
+        kind = tostring(command.type or "unknown"),
+        status = result.ok and "ok" or "failed",
+        startedAt = nowIso(),
+        cliVersion = type(meta) == "table" and meta.cliVersion or nil,
+        protocolVersion = type(meta) == "table" and meta.protocolVersion or nil,
+        pathsChanged = collectPaths(data),
+        warnings = type(data.warnings) == "table" and data.warnings or {},
+        error = result.ok and nil or tostring(result.error or "unknown error"),
+        snapshotBefore = data.snapshotBefore,
+        restoreParentPath = data.restoreParentPath
+    }
+    local logFolder = folder()
+    local value = Instance.new("StringValue")
+    value.Name = record.commandId
+    value.Value = encodeRecord(record)
+    value:SetAttribute("createdUnix", nowUnix())
+    value.Parent = logFolder
+    trim(logFolder)
+end
+
+function AuditLog.list()
+    local records = {}
+    for _, child in ipairs(folder():GetChildren()) do
+        local record = decodeRecord(child)
+        if record then
+            table.insert(records, record)
+        end
+    end
+    table.sort(records, function(a, b)
+        return tostring(a.startedAt or "") > tostring(b.startedAt or "")
+    end)
+    return records
+end
+
+function AuditLog.show(commandId)
+    for _, record in ipairs(AuditLog.list()) do
+        if record.commandId == commandId then
+            return record
+        end
+    end
+    return nil
+end
+
+local function rootNameFromBlob(blob)
+    local rootSpec = type(blob) == "table" and type(blob.instances) == "table" and blob.instances[blob.root] or nil
+    local props = type(rootSpec) == "table" and rootSpec.properties or nil
+    if type(props) == "table" and type(props.Name) == "string" and props.Name ~= "" then
+        return props.Name
+    end
+    return "Restored"
+end
+
+local function resolveParent(path)
+    local StudioPath = require(script.Parent.StudioPath)
+    return StudioPath.resolve(path)
+end
+
+function AuditLog.undo(commandId)
+    local record = AuditLog.show(commandId)
+    if not record then
+        return nil, "history record not found: " .. tostring(commandId)
+    end
+    if type(record.snapshotBefore) ~= "table" or type(record.restoreParentPath) ~= "string" then
+        return nil, "history record has no rollback snapshot"
+    end
+    local parent, err = resolveParent(record.restoreParentPath)
+    if not parent then
+        return nil, err
+    end
+    local rootName = rootNameFromBlob(record.snapshotBefore)
+    local existing = parent:FindFirstChild(rootName)
+    if existing then
+        existing:Destroy()
+    end
+    local root, warnings = Deserializer.deserialize(record.snapshotBefore, parent)
+    if not root then
+        return nil, warnings
+    end
+    return {
+        status = "restored",
+        commandId = commandId,
+        rootPath = root:GetFullName(),
+        warnings = warnings or {}
+    }, nil
+end
+
+return AuditLog
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="2">
+      <Properties>
+        <string name="Name">AutopilotReview</string>
+        <string name="Source"><![CDATA[local AutopilotReview = {}
+
+local latestRun = nil
+local widget = nil
+local contentLabel = nil
+
+local function valueOrDash(value)
+    if value == nil or value == "" then
+        return "-"
+    end
+    return tostring(value)
+end
+
+local function appendCounts(lines, counts)
+    if type(counts) ~= "table" then
+        return
+    end
+    table.insert(lines, "")
+    table.insert(lines, "Operations")
+    local keys = {}
+    for key in pairs(counts) do
+        table.insert(keys, tostring(key))
+    end
+    table.sort(keys)
+    for _, key in ipairs(keys) do
+        table.insert(lines, "  " .. key .. ": " .. tostring(counts[key]))
+    end
+end
+
+local function appendList(lines, title, values, limit)
+    if type(values) ~= "table" or #values == 0 then
+        return
+    end
+    table.insert(lines, "")
+    table.insert(lines, title)
+    for index, value in ipairs(values) do
+        if index > limit then
+            table.insert(lines, "  ... " .. tostring(#values - limit) .. " more")
+            break
+        end
+        table.insert(lines, "  " .. tostring(value))
+    end
+end
+
+local function appendActions(lines, values, limit)
+    if type(values) ~= "table" or #values == 0 then
+        return
+    end
+    table.insert(lines, "")
+    table.insert(lines, "Next actions")
+    for index, action in ipairs(values) do
+        if index > limit then
+            table.insert(lines, "  ... " .. tostring(#values - limit) .. " more")
+            break
+        end
+        if type(action) == "table" then
+            table.insert(lines, "  " .. valueOrDash(action.priority) .. ". " .. valueOrDash(action.title))
+            if action.command then
+                table.insert(lines, "     " .. tostring(action.command))
+            end
+        else
+            table.insert(lines, "  " .. tostring(action))
+        end
+    end
+end
+
+local function appendAction(lines, title, action)
+    if type(action) ~= "table" then
+        return
+    end
+    table.insert(lines, "")
+    table.insert(lines, title)
+    table.insert(lines, "  " .. valueOrDash(action.title))
+    if action.command then
+        table.insert(lines, "     " .. tostring(action.command))
+    end
+    if action.reason then
+        table.insert(lines, "     " .. tostring(action.reason))
+    end
+end
+
+local function appendRecords(lines, title, values, limit)
+    if type(values) ~= "table" or #values == 0 then
+        return
+    end
+    table.insert(lines, "")
+    table.insert(lines, title)
+    for index, value in ipairs(values) do
+        if index > limit then
+            table.insert(lines, "  ... " .. tostring(#values - limit) .. " more")
+            break
+        end
+        if type(value) == "table" then
+            local label = value.title or value.id or value.kind or value.path
+            table.insert(lines, "  " .. valueOrDash(label))
+            if value.status then
+                table.insert(lines, "     Status: " .. valueOrDash(value.status))
+            end
+            if value.path then
+                table.insert(lines, "     " .. tostring(value.path))
+            end
+            if value.reason then
+                table.insert(lines, "     " .. tostring(value.reason))
+            end
+        else
+            table.insert(lines, "  " .. tostring(value))
+        end
+    end
+end
+
+local function render()
+    if not contentLabel then
+        return
+    end
+
+    local lines = {}
+    if type(latestRun) ~= "table" then
+        table.insert(lines, "No Autopilot run has been published to this Studio session yet.")
+        table.insert(lines, "")
+        table.insert(lines, "Run `rs autopilot preview --live` or `rs autopilot apply` to send a review summary here.")
+    else
+        table.insert(lines, "Run: " .. valueOrDash(latestRun.runId))
+        table.insert(lines, "Status: " .. valueOrDash(latestRun.status))
+        table.insert(lines, "Scope: " .. valueOrDash(latestRun.scope))
+        table.insert(lines, "Risk: " .. valueOrDash(type(latestRun.risk) == "table" and latestRun.risk.level or nil))
+        table.insert(lines, "Updated: " .. valueOrDash(latestRun.updatedAt))
+        table.insert(lines, "")
+        table.insert(lines, "Prompt")
+        table.insert(lines, valueOrDash(latestRun.prompt))
+        appendCounts(lines, latestRun.operationCounts)
+        if latestRun.companionStatus or latestRun.reviewPackStatus or latestRun.arcStatus or latestRun.bestFriendStatus or latestRun.bestFriendPilotStatus or latestRun.bestFriendRunnerStatus then
+            table.insert(lines, "")
+            table.insert(lines, "AI handoff")
+            table.insert(lines, "  Companion: " .. valueOrDash(latestRun.companionStatus))
+            table.insert(lines, "  Review pack: " .. valueOrDash(latestRun.reviewPackStatus))
+            table.insert(lines, "  Best friend: " .. valueOrDash(latestRun.bestFriendStatus))
+            table.insert(lines, "  Pilot: " .. valueOrDash(latestRun.bestFriendPilotStatus))
+            table.insert(lines, "  Runner: " .. valueOrDash(latestRun.bestFriendRunnerStatus))
+            table.insert(lines, "  Setup ready: " .. valueOrDash(latestRun.setupReady))
+            table.insert(lines, "  Recommended: " .. valueOrDash(latestRun.recommendedCandidateId))
+        end
+        if latestRun.arcStatus then
+            table.insert(lines, "")
+            table.insert(lines, "AI companion arc")
+            table.insert(lines, "  Status: " .. valueOrDash(latestRun.arcStatus))
+            table.insert(lines, "  Phase: " .. valueOrDash(latestRun.arcPhase))
+            table.insert(lines, "  Verdict: " .. valueOrDash(latestRun.arcVerdict))
+            table.insert(lines, "  Wow session: " .. valueOrDash(latestRun.wowSessionStatus))
+            table.insert(lines, "  Demo session: " .. valueOrDash(latestRun.demoSessionStatus))
+            table.insert(lines, "  Demo ready: " .. valueOrDash(latestRun.arcReadyForCreatorDemo))
+            table.insert(lines, "  Reply ready: " .. valueOrDash(latestRun.arcReadyForPostDemoReply))
+            table.insert(lines, "  Demo title: " .. valueOrDash(latestRun.demoTitle))
+            if type(latestRun.selectedWowMoment) == "table" then
+                table.insert(lines, "  Moment: " .. valueOrDash(latestRun.selectedWowMoment.title))
+                table.insert(lines, "  Player beat: " .. valueOrDash(latestRun.selectedWowMoment.playerMoment))
+            end
+            if latestRun.creatorMessage then
+                table.insert(lines, "")
+                table.insert(lines, "Creator demo message")
+                table.insert(lines, tostring(latestRun.creatorMessage))
+            end
+            if latestRun.replyMessage then
+                table.insert(lines, "")
+                table.insert(lines, "Checked post-demo reply")
+                table.insert(lines, tostring(latestRun.replyMessage))
+            end
+        end
+        if latestRun.bestFriendStatus then
+            table.insert(lines, "")
+            table.insert(lines, "AI best friend context")
+            table.insert(lines, "  Status: " .. valueOrDash(latestRun.bestFriendStatus))
+            table.insert(lines, "  Relationship: " .. valueOrDash(latestRun.bestFriendRelationshipMode))
+            table.insert(lines, "  Task pack: " .. valueOrDash(latestRun.bestFriendTaskPackStatus))
+            table.insert(lines, "  Preflight: " .. valueOrDash(latestRun.bestFriendLaunchPreflightStatus))
+            table.insert(lines, "  Opening claim: " .. valueOrDash(latestRun.bestFriendOpeningReplyClaim))
+            appendAction(lines, "First safe action", latestRun.bestFriendFirstSafeAction)
+            appendAction(lines, "Protected first action", latestRun.bestFriendFirstActAction)
+            if latestRun.bestFriendOpeningReply then
+                table.insert(lines, "")
+                table.insert(lines, "Checked opening reply")
+                table.insert(lines, tostring(latestRun.bestFriendOpeningReply))
+            end
+            appendRecords(lines, "Read first", latestRun.bestFriendReadOrder, 5)
+            appendRecords(lines, "Context cards", latestRun.bestFriendContextCards, 5)
+        end
+        if latestRun.bestFriendPilotStatus then
+            table.insert(lines, "")
+            table.insert(lines, "AI co-pilot")
+            table.insert(lines, "  Status: " .. valueOrDash(latestRun.bestFriendPilotStatus))
+            table.insert(lines, "  Mode: " .. valueOrDash(latestRun.bestFriendPilotMode))
+            table.insert(lines, "  Verdict: " .. valueOrDash(latestRun.bestFriendPilotVerdict))
+            table.insert(lines, "  Mentor: " .. valueOrDash(latestRun.bestFriendPilotMentorStatus))
+            table.insert(lines, "  First-turn: " .. valueOrDash(latestRun.bestFriendPilotFirstTurnStatus))
+            table.insert(lines, "  Rescue: " .. valueOrDash(latestRun.bestFriendPilotRescueStatus))
+            table.insert(lines, "  Reply: " .. valueOrDash(latestRun.bestFriendPilotReplyStatus))
+            table.insert(lines, "  Protected ready: " .. valueOrDash(latestRun.bestFriendPilotProtectedActionReady))
+            if latestRun.bestFriendPilotSelectedCommand then
+                table.insert(lines, "")
+                table.insert(lines, "Selected co-pilot command")
+                table.insert(lines, tostring(latestRun.bestFriendPilotSelectedCommand))
+            end
+            if latestRun.bestFriendPilotCompanionMessage then
+                table.insert(lines, "")
+                table.insert(lines, "Checked companion message")
+                table.insert(lines, tostring(latestRun.bestFriendPilotCompanionMessage))
+            end
+        end
+        if latestRun.bestFriendRunnerStatus then
+            table.insert(lines, "")
+            table.insert(lines, "AI runner")
+            table.insert(lines, "  Status: " .. valueOrDash(latestRun.bestFriendRunnerStatus))
+            table.insert(lines, "  Verdict: " .. valueOrDash(latestRun.bestFriendRunnerVerdict))
+            table.insert(lines, "  Stopped: " .. valueOrDash(latestRun.bestFriendRunnerStoppedReason))
+            table.insert(lines, "  Steps: " .. valueOrDash(latestRun.bestFriendRunnerExecutedSteps) .. " / " .. valueOrDash(latestRun.bestFriendRunnerMaxSteps))
+            table.insert(lines, "  Last branch: " .. valueOrDash(latestRun.bestFriendRunnerLastBranch))
+            if latestRun.bestFriendRunnerCompanionMessage then
+                table.insert(lines, "")
+                table.insert(lines, "Runner companion message")
+                table.insert(lines, tostring(latestRun.bestFriendRunnerCompanionMessage))
+            end
+            appendRecords(lines, "Runner steps", latestRun.bestFriendRunnerSteps, 4)
+        end
+        if latestRun.agentBrief then
+            table.insert(lines, "")
+            table.insert(lines, "Agent brief")
+            table.insert(lines, tostring(latestRun.agentBrief))
+        end
+        appendList(lines, "Blockers", latestRun.blockers, 8)
+        appendList(lines, "Changed paths", latestRun.changedPaths, 12)
+        appendList(lines, "Warnings", latestRun.warnings, 8)
+        appendActions(lines, latestRun.nextActions, 6)
+        appendList(lines, "Safe to say", latestRun.safeToSay, 5)
+        appendList(lines, "Do not say", latestRun.doNotSay, 6)
+        if latestRun.rollbackArtifact then
+            table.insert(lines, "")
+            table.insert(lines, "Rollback")
+            table.insert(lines, "  Artifact: " .. tostring(latestRun.rollbackArtifact))
+            if type(latestRun.rollbackRestore) == "table" then
+                table.insert(lines, "  Restore: " .. valueOrDash(latestRun.rollbackRestore.status))
+            end
+        end
+        if type(latestRun.smoke) == "table" then
+            table.insert(lines, "")
+            table.insert(lines, "Smoke")
+            table.insert(lines, "  Suite: " .. valueOrDash(latestRun.smoke.suite))
+            table.insert(lines, "  Status: " .. (latestRun.smoke.ok and "PASS" or "FAIL"))
+            if latestRun.smoke.artifact then
+                table.insert(lines, "  Artifact: " .. tostring(latestRun.smoke.artifact))
+            end
+        end
+        if latestRun.error then
+            table.insert(lines, "")
+            table.insert(lines, "Error")
+            table.insert(lines, tostring(latestRun.error))
+        end
+        if type(latestRun.artifacts) == "table" then
+            table.insert(lines, "")
+            table.insert(lines, "Report")
+            table.insert(lines, valueOrDash(latestRun.artifacts.report))
+        end
+    end
+
+    contentLabel.Text = table.concat(lines, "\n")
+    task.defer(function()
+        if contentLabel and contentLabel.Parent then
+            contentLabel.Parent.CanvasSize = UDim2.fromOffset(0, contentLabel.TextBounds.Y + 32)
+        end
+    end)
+end
+
+function AutopilotReview.setup(pluginObject)
+    if not pluginObject or widget then
+        return
+    end
+
+    local toolbar = pluginObject:CreateToolbar("rs")
+    local button = toolbar:CreateButton("AutopilotReview", "Show rs Autopilot review", "")
+    button.ClickableWhenViewportHidden = true
+
+    local info = DockWidgetPluginGuiInfo.new(
+        Enum.InitialDockState.Right,
+        false,
+        false,
+        380,
+        520,
+        280,
+        240
+    )
+    widget = pluginObject:CreateDockWidgetPluginGui("rsAutopilotReview", info)
+    widget.Title = "rs Autopilot"
+
+    local root = Instance.new("Frame")
+    root.BackgroundColor3 = Color3.fromRGB(24, 26, 30)
+    root.BorderSizePixel = 0
+    root.Size = UDim2.fromScale(1, 1)
+    root.Parent = widget
+
+    local title = Instance.new("TextLabel")
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.SourceSansBold
+    title.Text = "Autopilot Review"
+    title.TextColor3 = Color3.fromRGB(242, 244, 248)
+    title.TextSize = 18
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Position = UDim2.fromOffset(16, 12)
+    title.Size = UDim2.new(1, -32, 0, 28)
+    title.Parent = root
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.BackgroundColor3 = Color3.fromRGB(32, 35, 40)
+    scroll.BorderSizePixel = 0
+    scroll.CanvasSize = UDim2.fromOffset(0, 0)
+    scroll.Position = UDim2.fromOffset(12, 52)
+    scroll.ScrollBarThickness = 8
+    scroll.Size = UDim2.new(1, -24, 1, -64)
+    scroll.Parent = root
+
+    contentLabel = Instance.new("TextLabel")
+    contentLabel.BackgroundTransparency = 1
+    contentLabel.Font = Enum.Font.Code
+    contentLabel.TextColor3 = Color3.fromRGB(224, 229, 236)
+    contentLabel.TextSize = 14
+    contentLabel.TextWrapped = true
+    contentLabel.TextXAlignment = Enum.TextXAlignment.Left
+    contentLabel.TextYAlignment = Enum.TextYAlignment.Top
+    contentLabel.Position = UDim2.fromOffset(12, 12)
+    contentLabel.Size = UDim2.new(1, -24, 0, 0)
+    contentLabel.AutomaticSize = Enum.AutomaticSize.Y
+    contentLabel.Parent = scroll
+
+    button.Click:Connect(function()
+        widget.Enabled = not widget.Enabled
+        render()
+    end)
+
+    render()
+end
+
+function AutopilotReview.handle(payload)
+    local action = tostring(payload.action or "get")
+    if action == "set" then
+        if type(payload.run) ~= "table" then
+            return { ok = false, error = "run missing" }
+        end
+        latestRun = payload.run
+        render()
+        return { ok = true, data = { status = "stored", runId = tostring(latestRun.runId or "") } }
+    elseif action == "clear" then
+        latestRun = nil
+        render()
+        return { ok = true, data = { status = "cleared" } }
+    elseif action == "get" then
+        return { ok = true, data = { status = latestRun and "available" or "empty", run = latestRun } }
+    end
+    return { ok = false, error = "unknown autopilotReview action: " .. action }
+end
+
+return AutopilotReview
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="3">
+      <Properties>
         <string name="Name">Config</string>
         <string name="Source"><![CDATA[return {
     bridgeUrl = "http://127.0.0.1:7878",
@@ -15,7 +565,7 @@
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="2">
+    <Item class="ModuleScript" referent="4">
       <Properties>
         <string name="Name">Deserializer</string>
         <string name="Source"><![CDATA[local CollectionService = game:GetService("CollectionService")
@@ -278,18 +828,25 @@ function Deserializer.deserialize(blob, parent)
         table.insert(warnings, "source: " .. tostring(warning))
     end
 
-    return root, warnings
+    return root, warnings, idMap
 end
 
 return Deserializer
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="3">
+    <Item class="ModuleScript" referent="5">
       <Properties>
         <string name="Name">Dispatch</string>
         <string name="Source"><![CDATA[local Dispatch = {}
 local handlers = {}
+local AuditLog = require(script.Parent.AuditLog)
+
+local function record(command, result)
+    pcall(function()
+        AuditLog.record(command, result)
+    end)
+end
 
 function Dispatch.register(kind, handler)
     handlers[kind] = handler
@@ -303,16 +860,23 @@ function Dispatch.run(command)
     local kind = command.type
     local handler = handlers[kind]
     if not handler then
-        return { ok = false, error = "unknown command type: " .. tostring(kind) }
+        local result = { ok = false, error = "unknown command type: " .. tostring(kind) }
+        record(command, result)
+        return result
     end
 
     local ok, result = pcall(handler, command.payload or {})
     if not ok then
-        return { ok = false, error = tostring(result) }
+        local failed = { ok = false, error = tostring(result) }
+        record(command, failed)
+        return failed
     end
     if type(result) ~= "table" or type(result.ok) ~= "boolean" then
-        return { ok = false, error = "handler returned an invalid result" }
+        local failed = { ok = false, error = "handler returned an invalid result" }
+        record(command, failed)
+        return failed
     end
+    record(command, result)
     return result
 end
 
@@ -320,7 +884,7 @@ return Dispatch
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="4">
+    <Item class="ModuleScript" referent="6">
       <Properties>
         <string name="Name">Exporter</string>
         <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
@@ -330,9 +894,12 @@ local Exporter = {}
 
 local ASSET_PROPERTIES = {
     AnimationId = "animation",
+    BottomImage = "image",
     Image = "image",
+    MidImage = "image",
     MeshId = "mesh",
     SoundId = "audio",
+    TopImage = "image",
     Texture = "image",
     TextureID = "image",
     TextureId = "image"
@@ -490,14 +1057,599 @@ return Exporter
 ]]></string>
       </Properties>
     </Item>
-    <Item class="Folder" referent="5">
+    <Item class="Folder" referent="7">
       <Properties>
         <string name="Name">Handlers</string>
       </Properties>
-      <Item class="ModuleScript" referent="6">
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">ApplyPlan</string>
+          <string name="Source"><![CDATA[local CollectionService = game:GetService("CollectionService")
+local StudioPath = require(script.Parent.Parent.StudioPath)
+local Encoders = require(script.Parent.Parent.PropertyEncoders)
+local Ownership = require(script.Parent.Parent.Ownership)
+local Serializer = require(script.Parent.Parent.Serializer)
+local Deserializer = require(script.Parent.Parent.Deserializer)
+
+local SCRIPT_CLASSES = {
+    Script = true,
+    LocalScript = true,
+    ModuleScript = true
+}
+
+local function splitDot(path)
+    local parts = {}
+    for part in string.gmatch(tostring(path or ""), "[^%.]+") do
+        table.insert(parts, part)
+    end
+    return parts
+end
+
+local function parentPathOf(path)
+    local parts = splitDot(path)
+    if #parts <= 1 then
+        return "game"
+    end
+    table.remove(parts, #parts)
+    return table.concat(parts, ".")
+end
+
+local function rootNameFromBlob(blob)
+    local rootSpec = type(blob) == "table" and type(blob.instances) == "table" and blob.instances[blob.root] or nil
+    local props = type(rootSpec) == "table" and rootSpec.properties or nil
+    if type(props) == "table" and type(props.Name) == "string" and props.Name ~= "" then
+        return props.Name
+    end
+    return "Restored"
+end
+
+local function restoreSnapshot(snapshot, restoreParentPath)
+    local parent, err = StudioPath.resolve(restoreParentPath)
+    if not parent then
+        return nil, err
+    end
+    local existing = parent:FindFirstChild(rootNameFromBlob(snapshot))
+    if existing then
+        existing:Destroy()
+    end
+    local root, warningsOrErr = Deserializer.deserialize(snapshot, parent)
+    if not root then
+        return nil, warningsOrErr
+    end
+    return root, warningsOrErr
+end
+
+local function resolveRelative(root, relative)
+    if relative == "." or relative == "" or relative == nil then
+        return root
+    end
+    local node = root
+    for _, part in ipairs(splitDot(relative)) do
+        node = node and node:FindFirstChild(part)
+        if not node then
+            return nil
+        end
+    end
+    return node
+end
+
+local function parentAndName(root, relative)
+    local parts = splitDot(relative)
+    local name = table.remove(parts, #parts)
+    if not name or name == "" then
+        return nil, nil
+    end
+    if #parts == 0 then
+        return root, name
+    end
+    return resolveRelative(root, table.concat(parts, ".")), name
+end
+
+local function toSet(values)
+    local set = {}
+    if type(values) == "table" then
+        for _, value in ipairs(values) do
+            set[string.lower(tostring(value))] = true
+        end
+    end
+    return set
+end
+
+local function changeAllowed(change, onlySet)
+    if not next(onlySet) then
+        return true
+    end
+    return onlySet[string.lower(tostring(change.kind or ""))] == true
+end
+
+local function excludesScripts(excludeSet)
+    return excludeSet.scripts == true or excludeSet.script == true
+end
+
+local function classExcluded(className, excludeSet)
+    if excludeSet[string.lower(tostring(className or ""))] == true then
+        return true
+    end
+    return excludesScripts(excludeSet) and SCRIPT_CLASSES[className] == true
+end
+
+local function propertyExcluded(instance, property, excludeSet)
+    if not excludesScripts(excludeSet) then
+        return false
+    end
+    return instance and SCRIPT_CLASSES[instance.ClassName] == true and tostring(property or "") == "Source"
+end
+
+local function decodeValue(value)
+    if type(value) == "table" and value[1] == "InstancePath" and type(value[2]) == "string" then
+        local instance = StudioPath.resolve(value[2])
+        return instance
+    end
+    local decoded = nil
+    local warning = nil
+    local ok, resultOrErr = pcall(function()
+        return Encoders.decode(value, {})
+    end)
+    if ok then
+        decoded = resultOrErr
+    else
+        warning = tostring(resultOrErr)
+    end
+    return decoded, warning
+end
+
+local function setTags(instance, encoded)
+    local desired = {}
+    if type(encoded) == "table" then
+        for _, tag in ipairs(encoded) do
+            desired[tostring(tag)] = true
+        end
+    end
+    for _, tag in ipairs(CollectionService:GetTags(instance)) do
+        if not desired[tag] then
+            CollectionService:RemoveTag(instance, tag)
+        end
+    end
+    for tag in pairs(desired) do
+        CollectionService:AddTag(instance, tag)
+    end
+end
+
+local function applySet(root, rootPath, change, options, result)
+    local instance = resolveRelative(root, change.path)
+    if not instance then
+        result.refused += 1
+        table.insert(result.warnings, "path not found: " .. rootPath .. "." .. tostring(change.path))
+        return
+    end
+    local scope, name = string.match(tostring(change.property or ""), "^([^.]+)%.(.+)$")
+    if not scope and change.property == "tags" then
+        scope = "tags"
+    end
+    if not scope then
+        result.skipped += 1
+        table.insert(result.warnings, "cannot apply class/topology change at " .. instance:GetFullName())
+        return
+    end
+    if propertyExcluded(instance, name, options.excludeSet) then
+        result.skipped += 1
+        return
+    end
+    local canMutate, mutateErr = Ownership.canMutate(instance, { force = options.force })
+    if not canMutate then
+        result.refused += 1
+        table.insert(result.warnings, mutateErr)
+        return
+    end
+    if options.dryRun then
+        result.applied += 1
+        table.insert(result.changedPaths, instance:GetFullName())
+        return
+    end
+    local ok, err = pcall(function()
+        if scope == "properties" then
+            local decoded = decodeValue(change.after)
+            instance[name] = decoded
+        elseif scope == "attributes" then
+            instance:SetAttribute(name, change.after)
+        elseif scope == "tags" then
+            setTags(instance, change.after)
+        else
+            error("unsupported property scope: " .. tostring(scope))
+        end
+    end)
+    if ok then
+        result.applied += 1
+        table.insert(result.changedPaths, instance:GetFullName())
+    else
+        result.refused += 1
+        table.insert(result.warnings, instance:GetFullName() .. ": " .. tostring(err))
+    end
+end
+
+local function applyCreate(root, change, options, result)
+    local className = type(change.after) == "string" and change.after or "Folder"
+    if classExcluded(className, options.excludeSet) then
+        result.skipped += 1
+        return
+    end
+    local parent, name = parentAndName(root, change.path)
+    if not parent then
+        result.refused += 1
+        table.insert(result.warnings, "parent not found for create: " .. tostring(change.path))
+        return
+    end
+    if parent:FindFirstChild(name) then
+        result.skipped += 1
+        table.insert(result.warnings, "create skipped because instance already exists: " .. parent:GetFullName() .. "." .. name)
+        return
+    end
+    if options.dryRun then
+        result.applied += 1
+        table.insert(result.changedPaths, parent:GetFullName() .. "." .. name)
+        return
+    end
+    local ok, instanceOrErr = pcall(function()
+        return Instance.new(className)
+    end)
+    if not ok or not instanceOrErr then
+        result.refused += 1
+        table.insert(result.warnings, "could not create class '" .. className .. "': " .. tostring(instanceOrErr))
+        return
+    end
+    instanceOrErr.Name = name
+    Ownership.stamp(instanceOrErr, options.sourcePrefix .. ":" .. tostring(change.path or instanceOrErr.Name))
+    instanceOrErr.Parent = parent
+    result.applied += 1
+    table.insert(result.changedPaths, instanceOrErr:GetFullName())
+end
+
+local function applyDelete(root, change, options, result)
+    local instance = resolveRelative(root, change.path)
+    if not instance then
+        result.skipped += 1
+        return
+    end
+    local canMutate, mutateErr = Ownership.canMutate(instance, { force = options.force })
+    if not canMutate then
+        result.refused += 1
+        table.insert(result.warnings, mutateErr)
+        return
+    end
+    if options.dryRun then
+        result.applied += 1
+        table.insert(result.changedPaths, instance:GetFullName())
+        return
+    end
+    table.insert(result.changedPaths, instance:GetFullName())
+    instance:Destroy()
+    result.applied += 1
+end
+
+local function applyPlanHandler(payload)
+    if type(payload.rootPath) ~= "string" then
+        return { ok = false, error = "rootPath missing" }
+    end
+    if type(payload.plan) ~= "table" then
+        return { ok = false, error = "plan missing" }
+    end
+    if payload.dryRun ~= true and payload.approved ~= true then
+        return { ok = false, error = "apply-plan requires approval; pass --yes from the CLI" }
+    end
+    if payload.dryRun ~= true and payload.plan.safeToApply == false then
+        return { ok = false, error = "fix plan has conflicts; refusing to apply unsafe plan" }
+    end
+    local root, err = StudioPath.resolve(payload.rootPath)
+    if not root then
+        return { ok = false, error = err }
+    end
+    local changes = type(payload.plan.changes) == "table" and payload.plan.changes or {}
+    local result = {
+        rootPath = root:GetFullName(),
+        dryRun = payload.dryRun == true,
+        applied = 0,
+        skipped = 0,
+        refused = 0,
+        changedPaths = {},
+        warnings = {}
+    }
+    if not result.dryRun then
+        result.snapshotBefore = Serializer.serialize(root)
+        result.restoreParentPath = parentPathOf(payload.rootPath)
+    end
+    local options = {
+        dryRun = result.dryRun,
+        force = payload.force == true,
+        onlySet = toSet(payload.only),
+        excludeSet = toSet(payload.exclude),
+        sourcePrefix = "apply-plan:" .. root:GetFullName()
+    }
+    for _, change in ipairs(changes) do
+        if not changeAllowed(change, options.onlySet) then
+            result.skipped += 1
+        elseif change.kind == "added" then
+            applyCreate(root, change, options, result)
+        elseif change.kind == "deleted" then
+            applyDelete(root, change, options, result)
+        elseif change.kind == "modified" or change.kind == "reference" then
+            applySet(root, payload.rootPath, change, options, result)
+        else
+            result.skipped += 1
+            table.insert(result.warnings, "unknown change kind: " .. tostring(change.kind))
+        end
+    end
+    if not result.dryRun and result.refused > 0 and result.snapshotBefore then
+        local restored, restoreWarningsOrErr = restoreSnapshot(result.snapshotBefore, result.restoreParentPath)
+        result.rolledBack = restored ~= nil
+        if restored then
+            result.rootPath = restored:GetFullName()
+            table.insert(result.warnings, "rolled back apply-plan because one or more operations were refused")
+            for _, warning in ipairs(restoreWarningsOrErr or {}) do
+                table.insert(result.warnings, "rollback: " .. tostring(warning))
+            end
+        else
+            table.insert(result.warnings, "rollback failed: " .. tostring(restoreWarningsOrErr))
+        end
+    end
+    return { ok = true, data = result }
+end
+
+return applyPlanHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
+        <Properties>
+          <string name="Name">Create</string>
+          <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
+
+local function decodeValue(value)
+    if type(value) ~= "table" then
+        return value, nil
+    end
+
+    local valueType = value.type
+    if valueType == "Vector3" then
+        return Vector3.new(tonumber(value.x) or 0, tonumber(value.y) or 0, tonumber(value.z) or 0), nil
+    elseif valueType == "Color3" then
+        return Color3.new(tonumber(value.r) or 0, tonumber(value.g) or 0, tonumber(value.b) or 0), nil
+    elseif valueType == "UDim2" then
+        return UDim2.new(
+            tonumber(value.xScale) or 0,
+            tonumber(value.xOffset) or 0,
+            tonumber(value.yScale) or 0,
+            tonumber(value.yOffset) or 0
+        ), nil
+    elseif valueType == "Enum" then
+        local enumType = Enum[tostring(value.enumType or "")]
+        if not enumType then
+            return nil, "unknown enum type: " .. tostring(value.enumType)
+        end
+        local enumValue = enumType[tostring(value.enumItem or "")]
+        if not enumValue then
+            return nil, "unknown enum item: " .. tostring(value.enumItem)
+        end
+        return enumValue, nil
+    end
+
+    return value, nil
+end
+
+local function createHandler(payload)
+    if type(payload.parentPath) ~= "string" then
+        return { ok = false, error = "parentPath missing" }
+    end
+    if type(payload.className) ~= "string" then
+        return { ok = false, error = "className missing" }
+    end
+    if type(payload.name) ~= "string" then
+        return { ok = false, error = "name missing" }
+    end
+
+    local parent, err = StudioPath.resolve(payload.parentPath)
+    if not parent then
+        return { ok = false, error = err }
+    end
+
+    local okCreate, instanceOrErr = pcall(function()
+        return Instance.new(payload.className)
+    end)
+    if not okCreate or not instanceOrErr then
+        return { ok = false, error = "could not create class '" .. tostring(payload.className) .. "': " .. tostring(instanceOrErr) }
+    end
+
+    local instance = instanceOrErr
+    local warnings = {}
+    local okName, nameErr = pcall(function()
+        instance.Name = payload.name
+    end)
+    if not okName then
+        instance:Destroy()
+        return { ok = false, error = "could not set Name: " .. tostring(nameErr) }
+    end
+
+    for _, property in ipairs(payload.properties or {}) do
+        local propertyName = property.name
+        if type(propertyName) ~= "string" or propertyName == "" then
+            instance:Destroy()
+            return { ok = false, error = "property name missing" }
+        end
+        local decoded, decodeErr = decodeValue(property.value)
+        if decodeErr then
+            instance:Destroy()
+            return { ok = false, error = propertyName .. ": " .. decodeErr }
+        end
+        local okSet, setErr = pcall(function()
+            instance[propertyName] = decoded
+        end)
+        if not okSet then
+            instance:Destroy()
+            return { ok = false, error = propertyName .. ": " .. tostring(setErr) }
+        end
+    end
+
+    instance.Parent = parent
+    return {
+        ok = true,
+        data = {
+            path = instance:GetFullName(),
+            className = instance.ClassName,
+            warnings = warnings
+        }
+    }
+end
+
+return createHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="10">
+        <Properties>
+          <string name="Name">Deps</string>
+          <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
+local Ownership = require(script.Parent.Parent.Ownership)
+
+local ASSET_PROPERTIES = {
+    MeshPart = { MeshId = "mesh", TextureID = "image", TextureId = "image" },
+    SpecialMesh = { MeshId = "mesh", TextureId = "image", TextureID = "image" },
+    Decal = { Texture = "image" },
+    Texture = { Texture = "image" },
+    ImageLabel = { Image = "image" },
+    ImageButton = { Image = "image" },
+    ScrollingFrame = { BottomImage = "image", MidImage = "image", TopImage = "image" },
+    Sound = { SoundId = "audio" },
+    Animation = { AnimationId = "animation" },
+    ParticleEmitter = { Texture = "image" },
+    Trail = { Texture = "image" },
+    Beam = { Texture = "image" },
+    SurfaceAppearance = {
+        ColorMap = "image",
+        MetalnessMap = "image",
+        NormalMap = "image",
+        RoughnessMap = "image"
+    }
+}
+
+local SCRIPT_CLASSES = {
+    Script = true,
+    LocalScript = true,
+    ModuleScript = true
+}
+
+local REMOTE_CLASSES = {
+    RemoteEvent = true,
+    RemoteFunction = true,
+    UnreliableRemoteEvent = true,
+    BindableEvent = true,
+    BindableFunction = true
+}
+
+local function descendantsInclusive(root)
+    local items = { root }
+    for _, descendant in ipairs(root:GetDescendants()) do
+        table.insert(items, descendant)
+    end
+    return items
+end
+
+local function readProperty(instance, property)
+    local ok, value = pcall(function()
+        return instance[property]
+    end)
+    if ok then
+        return value
+    end
+    return nil
+end
+
+local function isAssetUri(value)
+    return type(value) == "string" and value ~= ""
+end
+
+local function flagsFor(instance, value)
+    local flags = {}
+    if type(value) ~= "string" or value == "" then
+        table.insert(flags, "missing")
+        table.insert(flags, "empty")
+    elseif string.match(value, "^rbxassetid://%d+") or string.match(value, "^%d+$") then
+        table.insert(flags, "privateRisk")
+    end
+    if not Ownership.isOwned(instance) then
+        table.insert(flags, "unowned")
+    end
+    if instance.ClassName == "EditableImage" or instance.ClassName == "EditableMesh" then
+        table.insert(flags, "largeEditableRisk")
+    end
+    return flags
+end
+
+local function depsHandler(payload)
+    if type(payload.path) ~= "string" then
+        return { ok = false, error = "path missing" }
+    end
+    local root, err = StudioPath.resolve(payload.path)
+    if not root then
+        return { ok = false, error = err }
+    end
+    local dependencies = {}
+    local scripts = {}
+    local remotes = {}
+    local unowned = {}
+    local warnings = {}
+
+    for _, instance in ipairs(descendantsInclusive(root)) do
+        if not Ownership.isOwned(instance) then
+            table.insert(unowned, instance:GetFullName())
+        end
+        if SCRIPT_CLASSES[instance.ClassName] then
+            table.insert(scripts, instance:GetFullName())
+        end
+        if REMOTE_CLASSES[instance.ClassName] then
+            table.insert(remotes, instance:GetFullName())
+        end
+        if instance.ClassName == "EditableImage" or instance.ClassName == "EditableMesh" then
+            table.insert(warnings, "large editable asset risk: " .. instance:GetFullName())
+        end
+        local props = ASSET_PROPERTIES[instance.ClassName]
+        if props then
+            for property, kind in pairs(props) do
+                local value = readProperty(instance, property)
+                if isAssetUri(value) or property == "MeshId" or property == "SoundId" or property == "Image" or property == "AnimationId" then
+                    table.insert(dependencies, {
+                        path = instance:GetFullName(),
+                        className = instance.ClassName,
+                        property = property,
+                        kind = kind,
+                        value = tostring(value or ""),
+                        flags = flagsFor(instance, value)
+                    })
+                end
+            end
+        end
+    end
+
+    return {
+        ok = true,
+        data = {
+            rootPath = root:GetFullName(),
+            dependencies = dependencies,
+            scripts = scripts,
+            remotes = remotes,
+            unownedInstances = unowned,
+            warnings = warnings
+        }
+    }
+end
+
+return depsHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="11">
         <Properties>
           <string name="Name">Deserialize</string>
           <string name="Source"><![CDATA[local Deserializer = require(script.Parent.Parent.Deserializer)
+local Ownership = require(script.Parent.Parent.Ownership)
 
 local function splitPath(path)
     local parts = {}
@@ -529,6 +1681,38 @@ local function resolvePath(path)
     return node
 end
 
+local function rootNameFromBlob(blob)
+    local rootSpec = blob.instances and blob.instances[blob.root]
+    local props = type(rootSpec) == "table" and rootSpec.properties or nil
+    if type(props) == "table" and type(props.Name) == "string" and props.Name ~= "" then
+        return props.Name
+    end
+    return "Imported"
+end
+
+local function uniqueName(parent, baseName)
+    local candidate = baseName
+    local index = 2
+    while parent:FindFirstChild(candidate) do
+        candidate = baseName .. "_" .. tostring(index)
+        index += 1
+    end
+    return candidate
+end
+
+local function mergeInto(existing, imported)
+    for _, child in ipairs(imported:GetChildren()) do
+        child.Parent = existing
+    end
+    for key, value in pairs(imported:GetAttributes()) do
+        pcall(function()
+            existing:SetAttribute(key, value)
+        end)
+    end
+    imported:Destroy()
+    return existing
+end
+
 local function deserializeHandler(payload)
     if type(payload.parentPath) ~= "string" then
         return { ok = false, error = "parentPath missing" }
@@ -542,9 +1726,65 @@ local function deserializeHandler(payload)
         return { ok = false, error = "parent path not found: " .. payload.parentPath }
     end
 
-    local root, warningsOrErr = Deserializer.deserialize(payload.blob, parent)
+    local conflictMode = tostring(payload.conflictMode or "allow")
+    local rootName = rootNameFromBlob(payload.blob)
+    local existing = parent:FindFirstChild(rootName)
+    local existingBackup = nil
+    if payload.dryRun == true then
+        return {
+            ok = true,
+            data = {
+                rootPath = parent:GetFullName() .. "." .. rootName,
+                dryRun = true,
+                conflict = existing ~= nil,
+                conflictMode = conflictMode,
+                warnings = existing and { "existing child named " .. rootName .. " would trigger conflict mode " .. conflictMode } or {}
+            }
+        }
+    end
+    if existing then
+        if conflictMode == "fail" then
+            return { ok = false, error = "destination already has child named " .. rootName }
+        elseif conflictMode == "replace" then
+            if payload.rollbackOnError == true then
+                local okClone, cloneOrErr = pcall(function()
+                    return existing:Clone()
+                end)
+                if okClone and cloneOrErr then
+                    existingBackup = cloneOrErr
+                end
+            end
+            existing:Destroy()
+        elseif conflictMode ~= "rename" and conflictMode ~= "merge" and conflictMode ~= "allow" then
+            return { ok = false, error = "unknown conflictMode: " .. conflictMode }
+        end
+    end
+
+    local root, warningsOrErr, idMap = Deserializer.deserialize(payload.blob, parent)
     if not root then
+        if existingBackup then
+            existingBackup.Parent = parent
+        end
         return { ok = false, error = warningsOrErr }
+    end
+    if existingBackup then
+        existingBackup:Destroy()
+    end
+    if existing and conflictMode == "rename" then
+        root.Name = uniqueName(parent, rootName)
+    elseif existing and conflictMode == "merge" then
+        root = mergeInto(existing, root)
+    end
+    local sourceId = Ownership.sourceId(payload, "package")
+    if type(idMap) == "table" then
+        for localId, instance in pairs(idMap) do
+            Ownership.stamp(instance, Ownership.stableSourceId(payload.packageId, localId, sourceId), payload.packageId)
+        end
+    else
+        Ownership.stamp(root, sourceId, payload.packageId)
+        for _, descendant in ipairs(root:GetDescendants()) do
+            Ownership.stamp(descendant, sourceId, payload.packageId)
+        end
     end
     return { ok = true, data = { rootPath = root:GetFullName(), warnings = warningsOrErr or {} } }
 end
@@ -553,7 +1793,7 @@ return deserializeHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="7">
+      <Item class="ModuleScript" referent="12">
         <Properties>
           <string name="Name">Exec</string>
           <string name="Source"><![CDATA[local Encoders = require(script.Parent.Parent.PropertyEncoders)
@@ -591,7 +1831,7 @@ return execHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="8">
+      <Item class="ModuleScript" referent="13">
         <Properties>
           <string name="Name">Export</string>
           <string name="Source"><![CDATA[local Exporter = require(script.Parent.Parent.Exporter)
@@ -655,7 +1895,42 @@ return exportHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="9">
+      <Item class="ModuleScript" referent="14">
+        <Properties>
+          <string name="Name">History</string>
+          <string name="Source"><![CDATA[local AuditLog = require(script.Parent.Parent.AuditLog)
+
+local function historyHandler(payload)
+    local action = tostring(payload.action or "list")
+    if action == "list" then
+        return { ok = true, data = { records = AuditLog.list() } }
+    elseif action == "show" then
+        if type(payload.commandId) ~= "string" or payload.commandId == "" then
+            return { ok = false, error = "commandId missing" }
+        end
+        local record = AuditLog.show(payload.commandId)
+        if not record then
+            return { ok = false, error = "history record not found: " .. payload.commandId }
+        end
+        return { ok = true, data = record }
+    elseif action == "undo" then
+        if type(payload.commandId) ~= "string" or payload.commandId == "" then
+            return { ok = false, error = "commandId missing" }
+        end
+        local result, err = AuditLog.undo(payload.commandId)
+        if not result then
+            return { ok = false, error = err }
+        end
+        return { ok = true, data = result }
+    end
+    return { ok = false, error = "unknown history action: " .. action }
+end
+
+return historyHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="15">
         <Properties>
           <string name="Name">ImportAsset</string>
           <string name="Source"><![CDATA[local Importer = require(script.Parent.Parent.Importer)
@@ -721,7 +1996,83 @@ return importAssetHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="10">
+      <Item class="ModuleScript" referent="16">
+        <Properties>
+          <string name="Name">ImportAudio</string>
+          <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
+local Ownership = require(script.Parent.Parent.Ownership)
+
+local function normalizeAssetId(value)
+    if type(value) ~= "string" or value == "" then
+        return nil
+    end
+    if string.match(value, "^rbxassetid://%d+$") then
+        return value
+    end
+    if string.match(value, "^%d+$") then
+        return "rbxassetid://" .. value
+    end
+    return value
+end
+
+local function importAudioHandler(payload)
+    if type(payload.parentPath) ~= "string" then
+        return { ok = false, error = "parentPath missing" }
+    end
+    if type(payload.sounds) ~= "table" then
+        return { ok = false, error = "sounds missing" }
+    end
+
+    local parent, err = StudioPath.resolve(payload.parentPath)
+    if not parent then
+        return { ok = false, error = err }
+    end
+
+    local soundPaths = {}
+    local warnings = {}
+    local sourceId = Ownership.sourceId(payload, "audio")
+    for index, spec in ipairs(payload.sounds) do
+        local soundId = normalizeAssetId(spec.assetId)
+        if not soundId then
+            return { ok = false, error = "sound " .. tostring(index) .. " missing assetId" }
+        end
+        local name = StudioPath.sanitize(spec.name, "Sound")
+        local existing = parent:FindFirstChild(name)
+        if existing and not existing:IsA("Sound") then
+            existing:Destroy()
+            existing = nil
+        end
+        local sound = existing or Instance.new("Sound")
+        sound.Name = name
+        sound.SoundId = soundId
+        if spec.volume ~= nil then
+            sound.Volume = tonumber(spec.volume) or sound.Volume
+        end
+        if spec.playbackSpeed ~= nil then
+            sound.PlaybackSpeed = tonumber(spec.playbackSpeed) or sound.PlaybackSpeed
+        end
+        sound.Looped = spec.looped == true
+        sound.Parent = parent
+        Ownership.stamp(sound, sourceId)
+        table.insert(soundPaths, sound:GetFullName())
+    end
+
+    return {
+        ok = true,
+        data = {
+            parentPath = parent:GetFullName(),
+            soundCount = #soundPaths,
+            soundPaths = soundPaths,
+            warnings = warnings
+        }
+    }
+end
+
+return importAudioHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="17">
         <Properties>
           <string name="Name">ImportImage</string>
           <string name="Source"><![CDATA[local ImportImage = require(script.Parent.Parent.ImportImage)
@@ -787,7 +2138,515 @@ return importImageHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="11">
+      <Item class="ModuleScript" referent="18">
+        <Properties>
+          <string name="Name">ImportUiPack</string>
+          <string name="Source"><![CDATA[local ImportImage = require(script.Parent.Parent.ImportImage)
+local Ownership = require(script.Parent.Parent.Ownership)
+local StudioPath = require(script.Parent.Parent.StudioPath)
+
+local function resolveContainer(parent, name)
+    if parent:IsA("StarterGui") or parent:IsA("PlayerGui") then
+        local guiName = StudioPath.sanitize(name, "ImportedGui")
+        local existing = parent:FindFirstChild(guiName)
+        if existing and existing:IsA("ScreenGui") then
+            return existing, existing, nil
+        end
+        local screenGui = Instance.new("ScreenGui")
+        screenGui.Name = guiName
+        screenGui.ResetOnSpawn = false
+        screenGui.Parent = parent
+        return screenGui, screenGui, nil
+    end
+    if parent:IsA("LayerCollector") or parent:IsA("GuiObject") then
+        return parent, parent, nil
+    end
+    return nil, nil, "parent must be StarterGui, PlayerGui, ScreenGui, SurfaceGui, BillboardGui, or a GuiObject"
+end
+
+local function applyScaleType(imageObject, scaleTypeName)
+    if type(scaleTypeName) ~= "string" or scaleTypeName == "" then
+        imageObject.ScaleType = Enum.ScaleType.Fit
+        return nil
+    end
+    local value = Enum.ScaleType[scaleTypeName]
+    if not value then
+        return "unknown ScaleType: " .. tostring(scaleTypeName)
+    end
+    imageObject.ScaleType = value
+    return nil
+end
+
+local function upsertImageObject(container, element)
+    local kind = tostring(element.kind or "image")
+    local className = kind == "button" and "ImageButton" or "ImageLabel"
+    local name = StudioPath.sanitize(element.name, "Image")
+    local existing = container:FindFirstChild(name)
+    if existing and existing.ClassName ~= className then
+        existing:Destroy()
+        existing = nil
+    end
+    local imageObject = existing or ImportImage.createImageObject(kind)
+    imageObject.Name = name
+    imageObject.BackgroundTransparency = tonumber(element.backgroundTransparency) or 1
+    imageObject.BorderSizePixel = 0
+    imageObject.Size = UDim2.new(
+        tonumber(element.sizeScaleX) or 0,
+        tonumber(element.sizeOffsetX) or 0,
+        tonumber(element.sizeScaleY) or 0,
+        tonumber(element.sizeOffsetY) or 0
+    )
+    imageObject.Position = UDim2.new(
+        tonumber(element.positionScaleX) or 0,
+        tonumber(element.positionOffsetX) or 0,
+        tonumber(element.positionScaleY) or 0,
+        tonumber(element.positionOffsetY) or 0
+    )
+    imageObject.AnchorPoint = Vector2.new(tonumber(element.anchorX) or 0, tonumber(element.anchorY) or 0)
+    if element.zIndex ~= nil then
+        imageObject.ZIndex = math.floor(tonumber(element.zIndex) or imageObject.ZIndex)
+    end
+    local scaleErr = applyScaleType(imageObject, element.scaleType)
+    if scaleErr then
+        return nil, scaleErr
+    end
+    imageObject.Parent = container
+    return imageObject, nil
+end
+
+local function importOne(container, element)
+    local width = math.floor(tonumber(element.width) or 0)
+    local height = math.floor(tonumber(element.height) or 0)
+    if width < 1 or height < 1 then
+        return nil, "element width and height must be positive"
+    end
+    local pixels, decodeErr, decodedBytes = ImportImage.decodeBase64(element.pixelsBase64)
+    if not pixels then
+        return nil, decodeErr
+    end
+    local expectedBytes = width * height * 4
+    if decodedBytes ~= expectedBytes then
+        return nil, "decoded PNG pixel byte count mismatch: expected " .. tostring(expectedBytes) .. ", got " .. tostring(decodedBytes)
+    end
+
+    local editableImage, imageErr = ImportImage.createEditableImage(width, height, pixels)
+    if not editableImage then
+        return nil, imageErr
+    end
+
+    local imageObject, objectErr = upsertImageObject(container, element)
+    if not imageObject then
+        editableImage:Destroy()
+        return nil, objectErr
+    end
+
+    local okContent, contentErr = pcall(function()
+        imageObject.ImageContent = Content.fromObject(editableImage)
+    end)
+    if not okContent then
+        editableImage:Destroy()
+        return nil, "ImageContent assignment failed: " .. tostring(contentErr)
+    end
+    return imageObject, nil
+end
+
+local function importUiPackHandler(payload)
+    if type(payload.parentPath) ~= "string" then
+        return { ok = false, error = "parentPath missing" }
+    end
+    if type(payload.name) ~= "string" then
+        return { ok = false, error = "name missing" }
+    end
+    if type(payload.elements) ~= "table" then
+        return { ok = false, error = "elements missing" }
+    end
+
+    local parent, resolveErr = StudioPath.resolve(payload.parentPath)
+    if not parent then
+        return { ok = false, error = resolveErr }
+    end
+
+    local container, guiRoot, containerErr = resolveContainer(parent, payload.name)
+    if not container then
+        return { ok = false, error = containerErr }
+    end
+    local sourceId = Ownership.sourceId(payload, "ui")
+    Ownership.stamp(guiRoot, sourceId)
+
+    local elementPaths = {}
+    local warnings = {}
+    for index, element in ipairs(payload.elements) do
+        local imageObject, err = importOne(container, element)
+        if not imageObject then
+            return { ok = false, error = "element " .. tostring(index) .. ": " .. tostring(err) }
+        end
+        Ownership.stamp(imageObject, sourceId)
+        table.insert(elementPaths, imageObject:GetFullName())
+    end
+
+    return {
+        ok = true,
+        data = {
+            guiPath = guiRoot:GetFullName(),
+            elementCount = #elementPaths,
+            elementPaths = elementPaths,
+            warnings = warnings
+        }
+    }
+end
+
+return importUiPackHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="19">
+        <Properties>
+          <string name="Name">ImportUploaded</string>
+          <string name="Source"><![CDATA[local Ownership = require(script.Parent.Parent.Ownership)
+local StudioPath = require(script.Parent.Parent.StudioPath)
+
+local function normalizeAssetId(value)
+    if type(value) ~= "string" or value == "" then
+        return nil
+    end
+    if string.match(value, "^rbxassetid://%d+$") then
+        return value
+    end
+    if string.match(value, "^%d+$") then
+        return "rbxassetid://" .. value
+    end
+    return value
+end
+
+local function ensureImageContainer(parent, name)
+    if parent:IsA("StarterGui") or parent:IsA("PlayerGui") then
+        local gui = Instance.new("ScreenGui")
+        gui.Name = name .. "Gui"
+        gui.ResetOnSpawn = false
+        gui.Parent = parent
+        return gui, gui
+    end
+    return parent, parent
+end
+
+local function importImage(payload, parent, assetId, sourceId)
+    local name = StudioPath.sanitize(payload.name, "UploadedImage")
+    local container, root = ensureImageContainer(parent, name)
+    local uiKind = tostring(payload.uiKind or "image")
+    local object = uiKind == "button" and Instance.new("ImageButton") or Instance.new("ImageLabel")
+    object.Name = name
+    object.BackgroundTransparency = 1
+    object.BorderSizePixel = 0
+    object.Size = UDim2.fromOffset(tonumber(payload.uiWidth) or 128, tonumber(payload.uiHeight) or 128)
+    object.Position = UDim2.fromOffset(tonumber(payload.positionX) or 0, tonumber(payload.positionY) or 0)
+    object.ScaleType = Enum.ScaleType.Fit
+    object.Image = assetId
+    object.Parent = container
+    Ownership.stamp(root, sourceId)
+    Ownership.stamp(object, sourceId)
+    return root, object, {}
+end
+
+local function importAudio(payload, parent, assetId, sourceId)
+    local sound = Instance.new("Sound")
+    sound.Name = StudioPath.sanitize(payload.name, "UploadedSound")
+    sound.SoundId = assetId
+    if payload.volume ~= nil then
+        sound.Volume = tonumber(payload.volume) or sound.Volume
+    end
+    if payload.playbackSpeed ~= nil then
+        sound.PlaybackSpeed = tonumber(payload.playbackSpeed) or sound.PlaybackSpeed
+    end
+    sound.Looped = payload.looped == true
+    sound.Parent = parent
+    Ownership.stamp(sound, sourceId)
+    return sound, sound, {}
+end
+
+local function importUploadedHandler(payload)
+    if type(payload.parentPath) ~= "string" then
+        return { ok = false, error = "parentPath missing" }
+    end
+    if type(payload.kind) ~= "string" then
+        return { ok = false, error = "kind missing" }
+    end
+    local assetId = normalizeAssetId(payload.assetId)
+    if not assetId then
+        return { ok = false, error = "assetId missing" }
+    end
+    local parent, err = StudioPath.resolve(payload.parentPath)
+    if not parent then
+        return { ok = false, error = err }
+    end
+
+    local sourceId = Ownership.sourceId(payload, "uploaded")
+    local root, instance, warnings
+    if payload.kind == "image" then
+        root, instance, warnings = importImage(payload, parent, assetId, sourceId)
+    elseif payload.kind == "audio" then
+        root, instance, warnings = importAudio(payload, parent, assetId, sourceId)
+    else
+        return { ok = false, error = "unsupported uploaded asset kind: " .. tostring(payload.kind) }
+    end
+
+    return {
+        ok = true,
+        data = {
+            rootPath = root:GetFullName(),
+            instancePath = instance:GetFullName(),
+            className = instance.ClassName,
+            assetId = assetId,
+            warnings = warnings
+        }
+    }
+end
+
+return importUploadedHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="20">
+        <Properties>
+          <string name="Name">PackageUpdate</string>
+          <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
+local ServerStorage = game:GetService("ServerStorage")
+local Deserializer = require(script.Parent.Parent.Deserializer)
+local Ownership = require(script.Parent.Parent.Ownership)
+local Serializer = require(script.Parent.Parent.Serializer)
+local StudioPath = require(script.Parent.Parent.StudioPath)
+
+local function rootNameFromBlob(blob)
+    local rootSpec = type(blob) == "table" and type(blob.instances) == "table" and blob.instances[blob.root] or nil
+    local props = type(rootSpec) == "table" and rootSpec.properties or nil
+    if type(props) == "table" and type(props.Name) == "string" and props.Name ~= "" then
+        return props.Name
+    end
+    return "Imported"
+end
+
+local function stableRootSourceId(packageId, blob)
+    if type(blob) == "table" and type(blob.root) == "string" then
+        return Ownership.stableSourceId(packageId, blob.root, nil)
+    end
+    return nil
+end
+
+local function restoreSnapshot(snapshot, parent)
+    local rootName = rootNameFromBlob(snapshot)
+    local existing = parent:FindFirstChild(rootName)
+    if existing then
+        existing:Destroy()
+    end
+    return Deserializer.deserialize(snapshot, parent)
+end
+
+local function stampMap(idMap, packageId)
+    for localId, instance in pairs(idMap or {}) do
+        Ownership.stamp(instance, Ownership.stableSourceId(packageId, localId, nil), packageId)
+    end
+end
+
+local function tempParent()
+    local folder = Instance.new("Folder")
+    folder.Name = "__rsPackageUpdate_" .. HttpService:GenerateGUID(false)
+    folder.Parent = ServerStorage
+    return folder
+end
+
+local function findExisting(parent, packageId, rootSourceId, rootName)
+    for _, child in ipairs(parent:GetChildren()) do
+        if rootSourceId and child:GetAttribute("rsSourceId") == rootSourceId then
+            return child
+        end
+        if type(packageId) == "string" and packageId ~= "" and child:GetAttribute("rsPackageId") == packageId and child.Name == rootName then
+            return child
+        end
+    end
+    return parent:FindFirstChild(rootName)
+end
+
+local function findMatchingChild(targetParent, incoming)
+    local sourceId = incoming:GetAttribute("rsSourceId")
+    if type(sourceId) == "string" and sourceId ~= "" then
+        for _, child in ipairs(targetParent:GetChildren()) do
+            if child:GetAttribute("rsSourceId") == sourceId then
+                return child
+            end
+        end
+    end
+    return targetParent:FindFirstChild(incoming.Name)
+end
+
+local function mergeChildren(target, incoming, options, result)
+    for _, child in ipairs(incoming:GetChildren()) do
+        local existing = findMatchingChild(target, child)
+        if not existing then
+            result.created += 1
+            table.insert(result.changedPaths, target:GetFullName() .. "." .. child.Name)
+            if not options.dryRun then
+                child.Parent = target
+            end
+        else
+            local canMutate, mutateErr = Ownership.canMutate(existing, {
+                force = options.force,
+                packageId = options.packageId,
+                sourceId = child:GetAttribute("rsSourceId")
+            })
+            if not canMutate then
+                if options.mode == "preserve-local" then
+                    result.preserved += 1
+                    table.insert(result.warnings, mutateErr)
+                    if not options.dryRun then
+                        child:Destroy()
+                    end
+                else
+                    result.refused += 1
+                    table.insert(result.warnings, mutateErr)
+                    if not options.dryRun then
+                        child:Destroy()
+                    end
+                end
+            elseif options.mode == "preserve-local" then
+                mergeChildren(existing, child, options, result)
+                result.preserved += 1
+                if not options.dryRun then
+                    child:Destroy()
+                end
+            else
+                result.replaced += 1
+                table.insert(result.changedPaths, existing:GetFullName())
+                if not options.dryRun then
+                    local parent = existing.Parent
+                    existing:Destroy()
+                    child.Parent = parent
+                end
+            end
+        end
+    end
+end
+
+local function packageUpdateHandler(payload)
+    if type(payload.parentPath) ~= "string" then
+        return { ok = false, error = "parentPath missing" }
+    end
+    if type(payload.blob) ~= "table" then
+        return { ok = false, error = "blob missing" }
+    end
+    if type(payload.packageId) ~= "string" or payload.packageId == "" then
+        return { ok = false, error = "packageId missing" }
+    end
+    local parent, err = StudioPath.resolve(payload.parentPath)
+    if not parent then
+        return { ok = false, error = err }
+    end
+    local mode = tostring(payload.mode or "owned-only")
+    if mode ~= "owned-only" and mode ~= "preserve-local" and mode ~= "replace-owned" and mode ~= "conflict-report" then
+        return { ok = false, error = "unknown package update mode: " .. mode }
+    end
+
+    local dryRun = payload.dryRun == true or mode == "conflict-report"
+    local rootName = rootNameFromBlob(payload.blob)
+    local rootSourceId = stableRootSourceId(payload.packageId, payload.blob)
+    local existing = findExisting(parent, payload.packageId, rootSourceId, rootName)
+    local result = {
+        rootPath = existing and existing:GetFullName() or parent:GetFullName() .. "." .. rootName,
+        mode = mode,
+        dryRun = dryRun,
+        packageId = payload.packageId,
+        existing = existing ~= nil,
+        owned = existing and Ownership.isOwned(existing, rootSourceId, payload.packageId) or false,
+        created = 0,
+        replaced = 0,
+        preserved = 0,
+        refused = 0,
+        changedPaths = {},
+        warnings = {}
+    }
+
+    if dryRun and mode == "conflict-report" then
+        if existing and not result.owned and payload.force ~= true then
+            table.insert(result.warnings, "existing install is not owned by rs/package: " .. existing:GetFullName())
+        end
+        return { ok = true, data = result }
+    end
+
+    local temp = tempParent()
+    local imported, warningsOrErr, idMap = Deserializer.deserialize(payload.blob, temp)
+    if not imported then
+        temp:Destroy()
+        return { ok = false, error = warningsOrErr }
+    end
+    stampMap(idMap, payload.packageId)
+    for _, warning in ipairs(warningsOrErr or {}) do
+        table.insert(result.warnings, warning)
+    end
+
+    if existing and not dryRun then
+        result.snapshotBefore = Serializer.serialize(existing)
+        result.restoreParentPath = parent:GetFullName()
+    end
+
+    if existing then
+        local canMutate, mutateErr = Ownership.canMutate(existing, {
+            force = payload.force == true,
+            packageId = payload.packageId,
+            sourceId = rootSourceId
+        })
+        if not canMutate and mode ~= "preserve-local" then
+            result.refused += 1
+            table.insert(result.warnings, mutateErr)
+        end
+    end
+
+    if result.refused == 0 then
+        if not existing then
+            result.created += 1
+            table.insert(result.changedPaths, parent:GetFullName() .. "." .. imported.Name)
+            if not dryRun then
+                imported.Parent = parent
+            end
+            result.rootPath = parent:GetFullName() .. "." .. imported.Name
+        elseif mode == "replace-owned" then
+            result.replaced += 1
+            table.insert(result.changedPaths, existing:GetFullName())
+            if not dryRun then
+                existing:Destroy()
+                imported.Parent = parent
+            end
+            result.rootPath = parent:GetFullName() .. "." .. imported.Name
+        else
+            mergeChildren(existing, imported, {
+                dryRun = dryRun,
+                force = payload.force == true,
+                packageId = payload.packageId,
+                mode = mode
+            }, result)
+            result.rootPath = existing:GetFullName()
+        end
+    end
+
+    temp:Destroy()
+    if not dryRun and result.refused > 0 and result.snapshotBefore then
+        local restored, restoreWarningsOrErr = restoreSnapshot(result.snapshotBefore, parent)
+        result.rolledBack = restored ~= nil
+        if restored then
+            result.rootPath = restored:GetFullName()
+            table.insert(result.warnings, "rolled back package update because one or more operations were refused")
+            for _, warning in ipairs(restoreWarningsOrErr or {}) do
+                table.insert(result.warnings, "rollback: " .. tostring(warning))
+            end
+        else
+            table.insert(result.warnings, "rollback failed: " .. tostring(restoreWarningsOrErr))
+        end
+    end
+    return { ok = true, data = result }
+end
+
+return packageUpdateHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="21">
         <Properties>
           <string name="Name">Read</string>
           <string name="Source"><![CDATA[local Serializer = require(script.Parent.Parent.Serializer)
@@ -841,7 +2700,36 @@ return readHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="12">
+      <Item class="ModuleScript" referent="22">
+        <Properties>
+          <string name="Name">RepairTool</string>
+          <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
+local Inspector = require(script.Parent.Parent.Inspector)
+
+local function repairToolHandler(payload)
+    if type(payload.path) ~= "string" then
+        return { ok = false, error = "path missing" }
+    end
+    local target, err = StudioPath.resolve(payload.path)
+    if not target then
+        return { ok = false, error = err }
+    end
+    if not target:IsA("Tool") then
+        return { ok = false, error = "path must resolve to a Tool: " .. payload.path }
+    end
+
+    local result, repairErr = Inspector.repairTool(target, payload)
+    if not result then
+        return { ok = false, error = repairErr }
+    end
+    return { ok = true, data = result }
+end
+
+return repairToolHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="23">
         <Properties>
           <string name="Name">Serialize</string>
           <string name="Source"><![CDATA[local Serializer = require(script.Parent.Parent.Serializer)
@@ -891,8 +2779,264 @@ return serializeHandler
 ]]></string>
         </Properties>
       </Item>
+      <Item class="ModuleScript" referent="24">
+        <Properties>
+          <string name="Name">Snapshot</string>
+          <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
+local Inspector = require(script.Parent.Parent.Inspector)
+
+local function snapshotHandler(payload)
+    if type(payload.path) ~= "string" then
+        return { ok = false, error = "path missing" }
+    end
+    local target, err = StudioPath.resolve(payload.path)
+    if not target then
+        return { ok = false, error = err }
+    end
+    return { ok = true, data = Inspector.snapshot(target, payload.includePaths == true) }
+end
+
+return snapshotHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="25">
+        <Properties>
+          <string name="Name">UpsertFiles</string>
+          <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
+local Ownership = require(script.Parent.Parent.Ownership)
+
+local SCRIPT_CLASSES = {
+    Script = true,
+    LocalScript = true,
+    ModuleScript = true
+}
+
+local function splitRelativePath(path)
+    local parts = {}
+    for part in string.gmatch(tostring(path or ""), "[^/\\]+") do
+        if part ~= "." and part ~= "" then
+            table.insert(parts, part)
+        end
+    end
+    return parts
+end
+
+local function ensureFolder(parent, name, dryRun, sourceId)
+    local existing = parent:FindFirstChild(name)
+    if existing then
+        if not existing:IsA("Folder") then
+            return nil, "path segment exists but is not a Folder: " .. existing:GetFullName()
+        end
+        return existing, false
+    end
+    if dryRun then
+        return parent, true
+    end
+    local folder = Instance.new("Folder")
+    folder.Name = name
+    folder:SetAttribute("rsSyncGenerated", true)
+    Ownership.stamp(folder, sourceId)
+    folder.Parent = parent
+    return folder, true
+end
+
+local function ensureParent(root, relativePath, dryRun, sourceId)
+    local parts = splitRelativePath(relativePath)
+    local parent = root
+    for i = 1, math.max(#parts - 1, 0) do
+        local nextParent, err = ensureFolder(parent, parts[i], dryRun, sourceId)
+        if not nextParent then
+            return nil, err
+        end
+        parent = nextParent
+    end
+    return parent, nil
+end
+
+local function upsertItem(root, item, dryRun, sourceId, force)
+    local className = tostring(item.className or "")
+    if className == "" then
+        return nil, "className missing"
+    end
+    local name = StudioPath.sanitize(item.name, "Synced")
+    local parent, err = ensureParent(root, item.path, dryRun, sourceId)
+    if not parent then
+        return nil, err
+    end
+
+    local existing = parent:FindFirstChild(name)
+    local created = false
+    local updated = false
+    if existing then
+        local canMutate, mutateErr = Ownership.canMutate(existing, {
+            sourceId = sourceId,
+            force = force
+        })
+        if not canMutate then
+            return nil, mutateErr
+        end
+    end
+    if existing and existing.ClassName ~= className then
+        if dryRun then
+            return { path = parent:GetFullName() .. "." .. name, created = false, updated = true, unchanged = false }, nil
+        end
+        existing:Destroy()
+        existing = nil
+    end
+    local instance = existing
+    if not instance then
+        created = true
+        if not dryRun then
+            local ok, newInstanceOrErr = pcall(function()
+                return Instance.new(className)
+            end)
+            if not ok or not newInstanceOrErr then
+                return nil, "could not create class '" .. className .. "': " .. tostring(newInstanceOrErr)
+            end
+            instance = newInstanceOrErr
+            instance.Name = name
+            instance.Parent = parent
+        end
+    end
+
+    if instance and SCRIPT_CLASSES[className] and type(item.source) == "string" then
+        local current = nil
+        pcall(function()
+            current = instance.Source
+        end)
+        if current ~= item.source then
+            updated = not created
+            if not dryRun then
+                instance.Source = item.source
+            end
+        end
+    end
+
+    if instance and not dryRun then
+        instance:SetAttribute("rsSyncPath", tostring(item.path or ""))
+        instance:SetAttribute("rsSyncClassName", className)
+        Ownership.stamp(instance, sourceId)
+        for key, value in pairs(item.attributes or {}) do
+            pcall(function()
+                instance:SetAttribute(key, value)
+            end)
+        end
+    end
+
+    local path = instance and instance:GetFullName() or parent:GetFullName() .. "." .. name
+    return {
+        path = path,
+        created = created,
+        updated = updated,
+        unchanged = not created and not updated
+    }, nil
+end
+
+local function collectOwned(root)
+    local owned = {}
+    for _, descendant in ipairs(root:GetDescendants()) do
+        local path = descendant:GetAttribute("rsSyncPath")
+        if type(path) == "string" and path ~= "" then
+            owned[path] = descendant
+        end
+    end
+    return owned
+end
+
+local function upsertFilesHandler(payload)
+    if type(payload.parentPath) ~= "string" then
+        return { ok = false, error = "parentPath missing" }
+    end
+    if type(payload.items) ~= "table" then
+        return { ok = false, error = "items missing" }
+    end
+    local root, err = StudioPath.resolve(payload.parentPath)
+    if not root then
+        return { ok = false, error = err }
+    end
+
+    local dryRun = payload.dryRun == true
+    local desired = {}
+    local created = 0
+    local updated = 0
+    local unchanged = 0
+    local deleted = 0
+    local changedPaths = {}
+    local warnings = {}
+    local sourceId = Ownership.sourceId(payload, "sync")
+
+    for _, item in ipairs(payload.items) do
+        desired[tostring(item.path or "")] = true
+        local result, itemErr = upsertItem(root, item, dryRun, sourceId, payload.force == true)
+        if not result then
+            return { ok = false, error = itemErr }
+        end
+        if result.created then
+            created += 1
+            table.insert(changedPaths, result.path)
+        elseif result.updated then
+            updated += 1
+            table.insert(changedPaths, result.path)
+        else
+            unchanged += 1
+        end
+    end
+
+    if payload.delete == true then
+        for path, instance in pairs(collectOwned(root)) do
+            if not desired[path] then
+                deleted += 1
+                table.insert(changedPaths, instance:GetFullName())
+                if not dryRun then
+                    instance:Destroy()
+                end
+            end
+        end
+    end
+
+    return {
+        ok = true,
+        data = {
+            parentPath = root:GetFullName(),
+            created = created,
+            updated = updated,
+            deleted = deleted,
+            unchanged = unchanged,
+            dryRun = dryRun,
+            changedPaths = changedPaths,
+            warnings = warnings
+        }
+    }
+end
+
+return upsertFilesHandler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="26">
+        <Properties>
+          <string name="Name">Validate</string>
+          <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
+local Inspector = require(script.Parent.Parent.Inspector)
+
+local function validateHandler(payload)
+    if type(payload.path) ~= "string" then
+        return { ok = false, error = "path missing" }
+    end
+    local target, err = StudioPath.resolve(payload.path)
+    if not target then
+        return { ok = false, error = err }
+    end
+    return { ok = true, data = Inspector.validate(target, payload.rules) }
+end
+
+return validateHandler
+]]></string>
+        </Properties>
+      </Item>
     </Item>
-    <Item class="ModuleScript" referent="13">
+    <Item class="ModuleScript" referent="27">
       <Properties>
         <string name="Name">Http</string>
         <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
@@ -954,10 +3098,11 @@ return Http
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="14">
+    <Item class="ModuleScript" referent="28">
       <Properties>
         <string name="Name">ImportImage</string>
         <string name="Source"><![CDATA[local AssetService = game:GetService("AssetService")
+local Ownership = require(script.Parent.Ownership)
 
 local ImportImage = {}
 
@@ -1111,6 +3256,7 @@ function ImportImage.import(payload, parent)
     end
 
     local name = sanitize(payload.name)
+    local sourceId = Ownership.sourceId(payload, "image")
     local container, guiRoot, containerErr = resolveContainer(parent, name)
     if not container then
         return nil, containerErr
@@ -1148,6 +3294,8 @@ function ImportImage.import(payload, parent)
     end
 
     imageObject.Parent = container
+    Ownership.stamp(guiRoot, sourceId)
+    Ownership.stamp(imageObject, sourceId)
 
     return imageObject, {
         rootPath = guiRoot:GetFullName(),
@@ -1160,14 +3308,20 @@ function ImportImage.import(payload, parent)
     }
 end
 
+ImportImage.sanitize = sanitize
+ImportImage.decodeBase64 = decodeBase64
+ImportImage.createEditableImage = createEditableImage
+ImportImage.createImageObject = createImageObject
+
 return ImportImage
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="15">
+    <Item class="ModuleScript" referent="29">
       <Properties>
         <string name="Name">Importer</string>
         <string name="Source"><![CDATA[local AssetService = game:GetService("AssetService")
+local Ownership = require(script.Parent.Ownership)
 
 local Importer = {}
 
@@ -1206,6 +3360,82 @@ local function meshBounds(vertices)
         max = Vector3.new(math.max(max.X, vertex.X), math.max(max.Y, vertex.Y), math.max(max.Z, vertex.Z))
     end
     return min, max, (min + max) * 0.5
+end
+
+local function arrayToColor3(value)
+    if type(value) ~= "table" then
+        return nil
+    end
+    local r = tonumber(value[1])
+    local g = tonumber(value[2])
+    local b = tonumber(value[3])
+    if not r or not g or not b then
+        return nil
+    end
+    return Color3.new(math.clamp(r, 0, 1), math.clamp(g, 0, 1), math.clamp(b, 0, 1))
+end
+
+local function hierarchyParent(root, hierarchyPath)
+    if type(hierarchyPath) ~= "string" or hierarchyPath == "" then
+        return root
+    end
+    local parent = root
+    for segment in string.gmatch(hierarchyPath, "[^/\\]+") do
+        local safeSegment = sanitize(segment)
+        local child = parent:FindFirstChild(safeSegment)
+        if not child then
+            child = Instance.new("Folder")
+            child.Name = safeSegment
+            child:SetAttribute("rsSourceHierarchyFolder", true)
+            child.Parent = parent
+        elseif not child:IsA("Folder") then
+            child = parent
+        end
+        parent = child
+    end
+    return parent
+end
+
+local function applyMeshMetadata(part, mesh, warnings)
+    if type(mesh.materialName) == "string" and mesh.materialName ~= "" then
+        part:SetAttribute("rsMaterialName", mesh.materialName)
+        local material = Enum.Material[mesh.materialName]
+        if material then
+            part.Material = material
+        end
+    end
+    if type(mesh.textureUri) == "string" and mesh.textureUri ~= "" then
+        part:SetAttribute("rsTextureUri", mesh.textureUri)
+        local appearance = Instance.new("SurfaceAppearance")
+        appearance.Name = "rs_SurfaceAppearance"
+        local okColorMap, colorMapErr = pcall(function()
+            appearance.ColorMap = mesh.textureUri
+        end)
+        if okColorMap then
+            appearance.Parent = part
+        else
+            appearance:Destroy()
+            table.insert(warnings, part.Name .. ": could not apply texture as SurfaceAppearance.ColorMap: " .. tostring(colorMapErr))
+        end
+        local okTexture, textureErr = pcall(function()
+            part.TextureID = mesh.textureUri
+        end)
+        if not okTexture then
+            table.insert(warnings, part.Name .. ": preserved texture as rsTextureUri attribute only: " .. tostring(textureErr))
+        end
+    end
+    local color = arrayToColor3(mesh.color)
+    if color then
+        part.Color = color
+        part:SetAttribute("rsSourceColor", color)
+    end
+    if type(mesh.hierarchyPath) == "string" and mesh.hierarchyPath ~= "" then
+        part:SetAttribute("rsSourceHierarchy", mesh.hierarchyPath)
+    end
+    local pivot = vectorFromArray(mesh.sourcePivot)
+    if pivot then
+        part:SetAttribute("rsSourcePivot", pivot)
+    end
 end
 
 local function addTriangle(editableMesh, vertexIds, triangle, warnings, meshName)
@@ -1307,6 +3537,7 @@ local function createMeshPart(mesh, anchored, warnings)
     part.CanQuery = true
     part.CanTouch = true
     part.CFrame = CFrame.new(center)
+    applyMeshMetadata(part, mesh, warnings)
 
     return part, nil, {
         vertexCount = #vertices,
@@ -1343,6 +3574,8 @@ function Importer.import(payload, parent)
     local warnings = {}
     local root = Instance.new("Model")
     root.Name = sanitize(payload.name)
+    local sourceId = Ownership.sourceId(payload, "asset")
+    Ownership.stamp(root, sourceId)
 
     local parts = {}
     local vertexCount = 0
@@ -1353,7 +3586,8 @@ function Importer.import(payload, parent)
             root:Destroy()
             return nil, err
         end
-        part.Parent = root
+        Ownership.stamp(part, sourceId)
+        part.Parent = hierarchyParent(root, mesh.hierarchyPath)
         table.insert(parts, part)
         vertexCount += stats.vertexCount
         triangleCount += stats.triangleCount
@@ -1389,7 +3623,497 @@ return Importer
 ]]></string>
       </Properties>
     </Item>
-    <Item class="Script" referent="16">
+    <Item class="ModuleScript" referent="30">
+      <Properties>
+        <string name="Name">Inspector</string>
+        <string name="Source"><![CDATA[local Inspector = {}
+
+local ASSET_PROPERTIES = {
+    AnimationId = "animation",
+    BottomImage = "image",
+    Image = "image",
+    MidImage = "image",
+    MeshId = "mesh",
+    SoundId = "audio",
+    TopImage = "image",
+    Texture = "image",
+    TextureID = "image",
+    TextureId = "image"
+}
+
+local REF_PROPERTIES = {
+    Weld = { "Part0", "Part1" },
+    Motor6D = { "Part0", "Part1" },
+    Snap = { "Part0", "Part1" },
+    WeldConstraint = { "Part0", "Part1" },
+    ObjectValue = { "Value" },
+    SurfaceGui = { "Adornee" },
+    BillboardGui = { "Adornee" },
+    Beam = { "Attachment0", "Attachment1" },
+    Trail = { "Attachment0", "Attachment1" },
+    HingeConstraint = { "Attachment0", "Attachment1" },
+    BallSocketConstraint = { "Attachment0", "Attachment1" },
+    AlignPosition = { "Attachment0", "Attachment1" },
+    AlignOrientation = { "Attachment0", "Attachment1" },
+    RopeConstraint = { "Attachment0", "Attachment1" },
+    SpringConstraint = { "Attachment0", "Attachment1" }
+}
+
+local RIGID_JOINT_CLASSES = {
+    Weld = true,
+    Motor6D = true,
+    Snap = true,
+    WeldConstraint = true
+}
+
+local function fullName(instance)
+    local ok, value = pcall(function()
+        return instance:GetFullName()
+    end)
+    return ok and value or instance.Name
+end
+
+local function descendantsInclusive(root)
+    local items = { root }
+    for _, descendant in ipairs(root:GetDescendants()) do
+        table.insert(items, descendant)
+    end
+    return items
+end
+
+local function addDiagnostic(out, severity, rule, instance, property, message, fixId)
+    table.insert(out.diagnostics, {
+        severity = severity,
+        rule = rule,
+        path = fullName(instance),
+        property = property,
+        message = message,
+        fixId = fixId
+    })
+    out.summary[severity] = (out.summary[severity] or 0) + 1
+end
+
+local function ruleSet(rules)
+    local set = {}
+    if type(rules) ~= "table" or #rules == 0 then
+        set.all = true
+        return set
+    end
+    for _, rule in ipairs(rules) do
+        set[string.lower(tostring(rule))] = true
+    end
+    return set
+end
+
+local function hasRule(set, name)
+    return set.all or set[name] == true
+end
+
+local function readProperty(instance, property)
+    local ok, value = pcall(function()
+        return instance[property]
+    end)
+    if ok then
+        return value, nil
+    end
+    return nil, tostring(value)
+end
+
+local function isInside(value, root)
+    return typeof(value) == "Instance" and (value == root or value:IsDescendantOf(root))
+end
+
+local function validateReferences(root, out)
+    for _, instance in ipairs(descendantsInclusive(root)) do
+        local props = REF_PROPERTIES[instance.ClassName]
+        if props then
+            for _, property in ipairs(props) do
+                local value, err = readProperty(instance, property)
+                if err then
+                    table.insert(out.warnings, fullName(instance) .. "." .. property .. ": " .. err)
+                elseif value == nil then
+                    local severity = "warn"
+                    if property == "Part0" or property == "Part1" or property == "Attachment0" or property == "Attachment1" then
+                        severity = "fail"
+                    end
+                    addDiagnostic(out, severity, "ref.missing", instance, property, property .. " is nil", "repair-tool")
+                elseif typeof(value) == "Instance" and not isInside(value, root) then
+                    addDiagnostic(out, "warn", "ref.external", instance, property, property .. " points outside the validated subtree", nil)
+                end
+            end
+        end
+    end
+end
+
+local function collectBaseParts(tool)
+    local parts = {}
+    for _, descendant in ipairs(tool:GetDescendants()) do
+        if descendant:IsA("BasePart") then
+            table.insert(parts, descendant)
+        end
+    end
+    return parts
+end
+
+local function rigidJointParts(joint)
+    if not RIGID_JOINT_CLASSES[joint.ClassName] then
+        return nil, nil
+    end
+    local p0 = readProperty(joint, "Part0")
+    local p1 = readProperty(joint, "Part1")
+    if typeof(p0) == "Instance" and p0:IsA("BasePart") and typeof(p1) == "Instance" and p1:IsA("BasePart") then
+        return p0, p1
+    end
+    return nil, nil
+end
+
+local function connectedToHandle(tool, handle, parts)
+    local graph = {}
+    for _, part in ipairs(parts) do
+        graph[part] = {}
+    end
+    for _, descendant in ipairs(tool:GetDescendants()) do
+        local p0, p1 = rigidJointParts(descendant)
+        if p0 and p1 and graph[p0] and graph[p1] then
+            table.insert(graph[p0], p1)
+            table.insert(graph[p1], p0)
+        end
+    end
+
+    local seen = {}
+    local queue = { handle }
+    seen[handle] = true
+    local index = 1
+    while index <= #queue do
+        local current = queue[index]
+        index += 1
+        for _, nextPart in ipairs(graph[current] or {}) do
+            if not seen[nextPart] then
+                seen[nextPart] = true
+                table.insert(queue, nextPart)
+            end
+        end
+    end
+    return seen
+end
+
+local function validateTool(tool, out)
+    local handle = tool:FindFirstChild("Handle")
+    if not handle or not handle:IsA("BasePart") then
+        local requiresHandle = true
+        pcall(function()
+            requiresHandle = tool.RequiresHandle
+        end)
+        if requiresHandle then
+            addDiagnostic(out, "fail", "tool.handle.missing", tool, "Handle", "Tool requires a BasePart child named Handle", "repair-tool")
+        else
+            addDiagnostic(out, "info", "tool.handle.optional", tool, "Handle", "Tool has RequiresHandle=false and no Handle", nil)
+        end
+        return
+    end
+
+    local duplicateHandles = 0
+    for _, child in ipairs(tool:GetChildren()) do
+        if child.Name == "Handle" then
+            duplicateHandles += 1
+        end
+    end
+    if duplicateHandles > 1 then
+        addDiagnostic(out, "warn", "tool.handle.ambiguous", tool, "Handle", "Tool has multiple direct children named Handle", "repair-tool")
+    end
+
+    local parts = collectBaseParts(tool)
+    local connected = connectedToHandle(tool, handle, parts)
+    for _, part in ipairs(parts) do
+        local anchored = false
+        pcall(function()
+            anchored = part.Anchored
+        end)
+        if anchored then
+            addDiagnostic(out, "fail", "tool.part.anchored", part, "Anchored", "Tool BasePart is anchored", "repair-tool")
+        end
+        if part ~= handle and not connected[part] then
+            addDiagnostic(out, "fail", "tool.part.disconnected", part, nil, "BasePart is not rigidly connected to Handle", "repair-tool")
+        end
+    end
+    addDiagnostic(out, "info", "tool.parts", tool, nil, "Tool contains " .. tostring(#parts) .. " BasePart descendant(s)", nil)
+end
+
+local function validateTools(root, out)
+    for _, instance in ipairs(descendantsInclusive(root)) do
+        if instance:IsA("Tool") then
+            validateTool(instance, out)
+        end
+    end
+end
+
+local function validateAssets(root, out)
+    for _, instance in ipairs(descendantsInclusive(root)) do
+        if instance:IsA("MeshPart") then
+            local meshId = readProperty(instance, "MeshId")
+            if type(meshId) ~= "string" or meshId == "" then
+                addDiagnostic(out, "warn", "asset.mesh.missing", instance, "MeshId", "MeshPart has an empty MeshId", nil)
+            end
+        elseif instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
+            local image = readProperty(instance, "Image")
+            local imageContent = readProperty(instance, "ImageContent")
+            if (type(image) ~= "string" or image == "") and imageContent == nil then
+                addDiagnostic(out, "warn", "asset.image.missing", instance, "Image", "Image object has no Image or ImageContent", nil)
+            end
+        elseif instance:IsA("Sound") then
+            local soundId = readProperty(instance, "SoundId")
+            if type(soundId) ~= "string" or soundId == "" then
+                addDiagnostic(out, "warn", "asset.sound.missing", instance, "SoundId", "Sound has an empty SoundId", nil)
+            end
+        end
+    end
+end
+
+local function validateDuplicateNames(root, out)
+    for _, instance in ipairs(descendantsInclusive(root)) do
+        local counts = {}
+        for _, child in ipairs(instance:GetChildren()) do
+            counts[child.Name] = (counts[child.Name] or 0) + 1
+        end
+        for name, count in pairs(counts) do
+            if count > 1 then
+                addDiagnostic(out, "warn", "path.duplicate-name", instance, nil, tostring(count) .. " children are named '" .. tostring(name) .. "'", nil)
+            end
+        end
+    end
+end
+
+function Inspector.validate(root, rules)
+    local out = {
+        path = fullName(root),
+        summary = { fail = 0, warn = 0, info = 0 },
+        diagnostics = {},
+        warnings = {}
+    }
+    local enabled = ruleSet(rules)
+    if hasRule(enabled, "refs") or hasRule(enabled, "welds") then
+        validateReferences(root, out)
+    end
+    if hasRule(enabled, "tool") then
+        validateTools(root, out)
+    end
+    if hasRule(enabled, "assets") then
+        validateAssets(root, out)
+    end
+    if hasRule(enabled, "paths") or hasRule(enabled, "transfer") then
+        validateDuplicateNames(root, out)
+    end
+    return out
+end
+
+local function countSubtree(root)
+    return 1 + #root:GetDescendants()
+end
+
+local function maybeAsset(instance, property)
+    local value = readProperty(instance, property)
+    if type(value) == "string" and value ~= "" then
+        return value
+    end
+    return nil
+end
+
+function Inspector.snapshot(root, includePaths)
+    local classCounts = {}
+    local scriptCounts = {}
+    local assetRefs = {}
+    local duplicateNames = {}
+    local topSubtrees = {}
+    local paths = {}
+    local total = 0
+    local maxDepth = 0
+    local toolCount = 0
+    local meshPartCount = 0
+    local uiCount = 0
+    local remoteCount = 0
+    local warnings = {}
+
+    local function walk(instance, depth)
+        total += 1
+        maxDepth = math.max(maxDepth, depth)
+        classCounts[instance.ClassName] = (classCounts[instance.ClassName] or 0) + 1
+        if includePaths then
+            table.insert(paths, fullName(instance))
+        end
+        if instance:IsA("Script") or instance:IsA("LocalScript") or instance:IsA("ModuleScript") then
+            scriptCounts[instance.ClassName] = (scriptCounts[instance.ClassName] or 0) + 1
+        end
+        if instance:IsA("Tool") then
+            toolCount += 1
+        end
+        if instance:IsA("MeshPart") then
+            meshPartCount += 1
+        end
+        if instance:IsA("GuiObject") or instance:IsA("LayerCollector") then
+            uiCount += 1
+        end
+        if instance:IsA("RemoteEvent") or instance:IsA("RemoteFunction") then
+            remoteCount += 1
+        end
+
+        for property, kind in pairs(ASSET_PROPERTIES) do
+            local assetUri = maybeAsset(instance, property)
+            if assetUri then
+                table.insert(assetRefs, {
+                    path = fullName(instance),
+                    property = property,
+                    assetUri = assetUri,
+                    assetKind = kind
+                })
+            end
+        end
+
+        local siblingCounts = {}
+        for _, child in ipairs(instance:GetChildren()) do
+            siblingCounts[child.Name] = (siblingCounts[child.Name] or 0) + 1
+        end
+        for name, count in pairs(siblingCounts) do
+            if count > 1 then
+                table.insert(duplicateNames, {
+                    parentPath = fullName(instance),
+                    name = name,
+                    count = count
+                })
+            end
+        end
+
+        table.insert(topSubtrees, {
+            path = fullName(instance),
+            count = countSubtree(instance)
+        })
+
+        for _, child in ipairs(instance:GetChildren()) do
+            walk(child, depth + 1)
+        end
+    end
+
+    walk(root, 0)
+    table.sort(topSubtrees, function(a, b)
+        return a.count > b.count
+    end)
+    while #topSubtrees > 10 do
+        table.remove(topSubtrees)
+    end
+
+    return {
+        rootPath = fullName(root),
+        totalInstances = total,
+        maxDepth = maxDepth,
+        classCounts = classCounts,
+        scriptCounts = scriptCounts,
+        toolCount = toolCount,
+        meshPartCount = meshPartCount,
+        uiCount = uiCount,
+        remoteCount = remoteCount,
+        assetReferences = assetRefs,
+        duplicateSiblingNames = duplicateNames,
+        topSubtrees = topSubtrees,
+        paths = paths,
+        warnings = warnings
+    }
+end
+
+local function allToolJoints(tool)
+    local joints = {}
+    for _, descendant in ipairs(tool:GetDescendants()) do
+        if RIGID_JOINT_CLASSES[descendant.ClassName] then
+            table.insert(joints, descendant)
+        end
+    end
+    return joints
+end
+
+function Inspector.repairTool(tool, options)
+    options = options or {}
+    local dryRun = options.dryRun == true
+    local handleName = type(options.handle) == "string" and options.handle or "Handle"
+    local handle = tool:FindFirstChild(handleName)
+    if not handle or not handle:IsA("BasePart") then
+        return nil, "Tool has no BasePart child named " .. handleName
+    end
+
+    local parts = collectBaseParts(tool)
+    local result = {
+        path = fullName(tool),
+        dryRun = dryRun,
+        partsFound = #parts,
+        validJointsPreserved = 0,
+        brokenJointsFound = 0,
+        weldsCreated = 0,
+        physicsPropertiesChanged = 0,
+        warnings = {}
+    }
+
+    for _, joint in ipairs(allToolJoints(tool)) do
+        local p0, p1 = rigidJointParts(joint)
+        if p0 and p1 then
+            result.validJointsPreserved += 1
+        else
+            result.brokenJointsFound += 1
+            if options.replaceBroken == true and not dryRun then
+                joint:Destroy()
+            end
+        end
+    end
+
+    local connected = connectedToHandle(tool, handle, parts)
+    for _, part in ipairs(parts) do
+        if part ~= handle and not connected[part] then
+            result.weldsCreated += 1
+            if not dryRun then
+                local weld = Instance.new("WeldConstraint")
+                weld.Name = "rs_HandleWeld_" .. part.Name
+                weld.Part0 = handle
+                weld.Part1 = part
+                weld.Parent = tool
+            end
+        end
+
+        if options.physicsFix ~= false then
+            local changed = false
+            if part.Anchored ~= false then
+                changed = true
+                if not dryRun then
+                    part.Anchored = false
+                end
+            end
+            if part ~= handle then
+                local desiredCollision = options.collision
+                if desiredCollision == nil then
+                    desiredCollision = false
+                end
+                if part.CanCollide ~= desiredCollision then
+                    changed = true
+                    if not dryRun then
+                        part.CanCollide = desiredCollision
+                    end
+                end
+                if options.massless ~= nil and part.Massless ~= options.massless then
+                    changed = true
+                    if not dryRun then
+                        part.Massless = options.massless
+                    end
+                end
+            end
+            if changed then
+                result.physicsPropertiesChanged += 1
+            end
+        end
+    end
+
+    return result, nil
+end
+
+return Inspector
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="Script" referent="31">
       <Properties>
         <string name="Name">Main</string>
         <token name="RunContext">0</token>
@@ -1397,14 +4121,57 @@ return Importer
 local Config = require(script.Parent.Config)
 local Http = require(script.Parent.Http)
 local Dispatch = require(script.Parent.Dispatch)
+local AutopilotReview = require(script.Parent.AutopilotReview)
+
+local PROTOCOL_VERSION = 5
+local PLUGIN_VERSION = "0.4.0"
+local CAPABILITIES = {
+    "exec",
+    "read",
+    "export",
+    "importAsset",
+    "importImage",
+    "importUploaded",
+    "importUiPack",
+    "importAudio",
+    "validate",
+    "repairTool",
+    "snapshot",
+    "create",
+    "upsertFiles",
+    "applyPlan",
+    "packageUpdate",
+    "history",
+    "deps",
+    "serialize",
+    "deserialize",
+    "autopilotReview"
+}
 
 Dispatch.register("exec", require(script.Parent.Handlers.Exec))
 Dispatch.register("read", require(script.Parent.Handlers.Read))
 Dispatch.register("export", require(script.Parent.Handlers.Export))
 Dispatch.register("importAsset", require(script.Parent.Handlers.ImportAsset))
 Dispatch.register("importImage", require(script.Parent.Handlers.ImportImage))
+Dispatch.register("importUploaded", require(script.Parent.Handlers.ImportUploaded))
+Dispatch.register("importUiPack", require(script.Parent.Handlers.ImportUiPack))
+Dispatch.register("importAudio", require(script.Parent.Handlers.ImportAudio))
+Dispatch.register("validate", require(script.Parent.Handlers.Validate))
+Dispatch.register("repairTool", require(script.Parent.Handlers.RepairTool))
+Dispatch.register("snapshot", require(script.Parent.Handlers.Snapshot))
+Dispatch.register("create", require(script.Parent.Handlers.Create))
+Dispatch.register("upsertFiles", require(script.Parent.Handlers.UpsertFiles))
+Dispatch.register("applyPlan", require(script.Parent.Handlers.ApplyPlan))
+Dispatch.register("packageUpdate", require(script.Parent.Handlers.PackageUpdate))
+Dispatch.register("history", require(script.Parent.Handlers.History))
+Dispatch.register("deps", require(script.Parent.Handlers.Deps))
 Dispatch.register("serialize", require(script.Parent.Handlers.Serialize))
 Dispatch.register("deserialize", require(script.Parent.Handlers.Deserialize))
+Dispatch.register("autopilotReview", AutopilotReview.handle)
+
+pcall(function()
+    AutopilotReview.setup(plugin)
+end)
 
 local studioId = HttpService:GenerateGUID(false)
 local sessionToken = nil
@@ -1435,7 +4202,10 @@ local function register()
     local response, err = Http.post(Config.bridgeUrl .. "/register", {
         id = studioId,
         name = game.Name,
-        placeFilePath = getPlaceFilePath()
+        placeFilePath = getPlaceFilePath(),
+        protocolVersion = PROTOCOL_VERSION,
+        pluginVersion = PLUGIN_VERSION,
+        capabilities = CAPABILITIES
     })
     if not response then
         warn("[rs-bridge-plugin] register failed: " .. tostring(err))
@@ -1542,7 +4312,91 @@ end)
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="17">
+    <Item class="ModuleScript" referent="32">
+      <Properties>
+        <string name="Name">Ownership</string>
+        <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
+
+local Ownership = {}
+
+local function importedAt()
+    return DateTime.now():ToIsoDate()
+end
+
+function Ownership.sourceId(payload, fallbackPrefix)
+    if type(payload) == "table" and type(payload.sourceId) == "string" and payload.sourceId ~= "" then
+        return payload.sourceId
+    end
+    return tostring(fallbackPrefix or "rs") .. "-" .. HttpService:GenerateGUID(false)
+end
+
+function Ownership.stamp(instance, sourceId, packageId)
+    if not instance then
+        return
+    end
+    pcall(function()
+        if type(sourceId) == "string" and sourceId ~= "" then
+            instance:SetAttribute("rsSourceId", sourceId)
+        end
+        if type(packageId) == "string" and packageId ~= "" then
+            instance:SetAttribute("rsPackageId", packageId)
+        end
+        instance:SetAttribute("rsImportedAt", importedAt())
+        instance:SetAttribute("rsManagedBy", "rs")
+    end)
+end
+
+function Ownership.isOwned(instance, sourceId, packageId)
+    if not instance then
+        return false
+    end
+    local managedBy = nil
+    local existingSourceId = nil
+    local existingPackageId = nil
+    pcall(function()
+        managedBy = instance:GetAttribute("rsManagedBy")
+        existingSourceId = instance:GetAttribute("rsSourceId")
+        existingPackageId = instance:GetAttribute("rsPackageId")
+    end)
+    if managedBy == "rs" then
+        return true
+    end
+    if type(sourceId) == "string" and sourceId ~= "" and existingSourceId == sourceId then
+        return true
+    end
+    if type(packageId) == "string" and packageId ~= "" and existingPackageId == packageId then
+        return true
+    end
+    return false
+end
+
+function Ownership.canMutate(instance, options)
+    options = options or {}
+    if options.force == true then
+        return true, nil
+    end
+    if Ownership.isOwned(instance, options.sourceId, options.packageId) then
+        return true, nil
+    end
+    local path = "<unknown>"
+    pcall(function()
+        path = instance:GetFullName()
+    end)
+    return false, "refusing to overwrite user-owned/manual instance: " .. path .. " (pass --force to override)"
+end
+
+function Ownership.stableSourceId(packageId, localId, fallback)
+    if type(packageId) == "string" and packageId ~= "" and type(localId) == "string" and localId ~= "" then
+        return packageId .. ":" .. localId
+    end
+    return fallback
+end
+
+return Ownership
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="33">
       <Properties>
         <string name="Name">PropertyAllowlist</string>
         <string name="Source"><![CDATA[local Allowlist = {}
@@ -1685,7 +4539,7 @@ return Allowlist
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="18">
+    <Item class="ModuleScript" referent="34">
       <Properties>
         <string name="Name">PropertyEncoders</string>
         <string name="Source"><![CDATA[local Encoders = {}
@@ -1838,7 +4692,7 @@ return Encoders
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="19">
+    <Item class="ModuleScript" referent="35">
       <Properties>
         <string name="Name">Serializer</string>
         <string name="Source"><![CDATA[local CollectionService = game:GetService("CollectionService")
@@ -1961,6 +4815,85 @@ function Serializer.serialize(root)
 end
 
 return Serializer
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="36">
+      <Properties>
+        <string name="Name">StudioPath</string>
+        <string name="Source"><![CDATA[local StudioPath = {}
+
+local function splitPath(path)
+    local parts = {}
+    for part in string.gmatch(path, "[^%.]+") do
+        table.insert(parts, part)
+    end
+    return parts
+end
+
+local function findUniqueChild(parent, name)
+    local found = nil
+    local count = 0
+    for _, child in ipairs(parent:GetChildren()) do
+        if child.Name == name then
+            found = child
+            count += 1
+        end
+    end
+    if count > 1 then
+        return nil, "ambiguous path segment '" .. tostring(name) .. "' under " .. parent:GetFullName()
+    end
+    return found, nil
+end
+
+function StudioPath.resolve(path)
+    if type(path) ~= "string" or path == "" then
+        return nil, "path missing"
+    end
+    if path == "game" or path == "DataModel" then
+        return game, nil
+    end
+
+    local node = game
+    for i, part in ipairs(splitPath(path)) do
+        if i == 1 then
+            local service = game:FindFirstChild(part)
+            if not service then
+                local ok, result = pcall(function()
+                    return game:GetService(part)
+                end)
+                service = ok and result or nil
+            end
+            node = service
+        else
+            local err = nil
+            node, err = findUniqueChild(node, part)
+            if err then
+                return nil, err
+            end
+        end
+        if not node then
+            return nil, "path not found: " .. path
+        end
+    end
+    return node, nil
+end
+
+function StudioPath.sanitize(value, fallback)
+    value = tostring(value or fallback or "Instance")
+    value = string.gsub(value, "[<>:\"/\\|%?%*%c]", "_")
+    value = string.gsub(value, "^%s+", "")
+    value = string.gsub(value, "%s+$", "")
+    if value == "" then
+        value = fallback or "Instance"
+    end
+    if #value > 80 then
+        value = string.sub(value, 1, 80)
+    end
+    return value
+end
+
+return StudioPath
 ]]></string>
       </Properties>
     </Item>

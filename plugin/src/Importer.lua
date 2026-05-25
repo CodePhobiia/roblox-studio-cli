@@ -1,4 +1,5 @@
 local AssetService = game:GetService("AssetService")
+local Ownership = require(script.Parent.Ownership)
 
 local Importer = {}
 
@@ -37,6 +38,82 @@ local function meshBounds(vertices)
         max = Vector3.new(math.max(max.X, vertex.X), math.max(max.Y, vertex.Y), math.max(max.Z, vertex.Z))
     end
     return min, max, (min + max) * 0.5
+end
+
+local function arrayToColor3(value)
+    if type(value) ~= "table" then
+        return nil
+    end
+    local r = tonumber(value[1])
+    local g = tonumber(value[2])
+    local b = tonumber(value[3])
+    if not r or not g or not b then
+        return nil
+    end
+    return Color3.new(math.clamp(r, 0, 1), math.clamp(g, 0, 1), math.clamp(b, 0, 1))
+end
+
+local function hierarchyParent(root, hierarchyPath)
+    if type(hierarchyPath) ~= "string" or hierarchyPath == "" then
+        return root
+    end
+    local parent = root
+    for segment in string.gmatch(hierarchyPath, "[^/\\]+") do
+        local safeSegment = sanitize(segment)
+        local child = parent:FindFirstChild(safeSegment)
+        if not child then
+            child = Instance.new("Folder")
+            child.Name = safeSegment
+            child:SetAttribute("rsSourceHierarchyFolder", true)
+            child.Parent = parent
+        elseif not child:IsA("Folder") then
+            child = parent
+        end
+        parent = child
+    end
+    return parent
+end
+
+local function applyMeshMetadata(part, mesh, warnings)
+    if type(mesh.materialName) == "string" and mesh.materialName ~= "" then
+        part:SetAttribute("rsMaterialName", mesh.materialName)
+        local material = Enum.Material[mesh.materialName]
+        if material then
+            part.Material = material
+        end
+    end
+    if type(mesh.textureUri) == "string" and mesh.textureUri ~= "" then
+        part:SetAttribute("rsTextureUri", mesh.textureUri)
+        local appearance = Instance.new("SurfaceAppearance")
+        appearance.Name = "rs_SurfaceAppearance"
+        local okColorMap, colorMapErr = pcall(function()
+            appearance.ColorMap = mesh.textureUri
+        end)
+        if okColorMap then
+            appearance.Parent = part
+        else
+            appearance:Destroy()
+            table.insert(warnings, part.Name .. ": could not apply texture as SurfaceAppearance.ColorMap: " .. tostring(colorMapErr))
+        end
+        local okTexture, textureErr = pcall(function()
+            part.TextureID = mesh.textureUri
+        end)
+        if not okTexture then
+            table.insert(warnings, part.Name .. ": preserved texture as rsTextureUri attribute only: " .. tostring(textureErr))
+        end
+    end
+    local color = arrayToColor3(mesh.color)
+    if color then
+        part.Color = color
+        part:SetAttribute("rsSourceColor", color)
+    end
+    if type(mesh.hierarchyPath) == "string" and mesh.hierarchyPath ~= "" then
+        part:SetAttribute("rsSourceHierarchy", mesh.hierarchyPath)
+    end
+    local pivot = vectorFromArray(mesh.sourcePivot)
+    if pivot then
+        part:SetAttribute("rsSourcePivot", pivot)
+    end
 end
 
 local function addTriangle(editableMesh, vertexIds, triangle, warnings, meshName)
@@ -138,6 +215,7 @@ local function createMeshPart(mesh, anchored, warnings)
     part.CanQuery = true
     part.CanTouch = true
     part.CFrame = CFrame.new(center)
+    applyMeshMetadata(part, mesh, warnings)
 
     return part, nil, {
         vertexCount = #vertices,
@@ -174,6 +252,8 @@ function Importer.import(payload, parent)
     local warnings = {}
     local root = Instance.new("Model")
     root.Name = sanitize(payload.name)
+    local sourceId = Ownership.sourceId(payload, "asset")
+    Ownership.stamp(root, sourceId)
 
     local parts = {}
     local vertexCount = 0
@@ -184,7 +264,8 @@ function Importer.import(payload, parent)
             root:Destroy()
             return nil, err
         end
-        part.Parent = root
+        Ownership.stamp(part, sourceId)
+        part.Parent = hierarchyParent(root, mesh.hierarchyPath)
         table.insert(parts, part)
         vertexCount += stats.vertexCount
         triangleCount += stats.triangleCount

@@ -258,7 +258,7 @@ function Deserializer.deserialize(blob, parent)
         table.insert(warnings, "source: " .. tostring(warning))
     end
 
-    return root, warnings
+    return root, warnings, idMap
 end
 
 return Deserializer

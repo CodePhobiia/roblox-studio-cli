@@ -1,0 +1,6 @@
+{
+  "kind": "autopilotCompose",
+  "prompt": "Build a full starter game loop with economy, quests, inventory, teleport pads, obby checkpoints, an NPC guide, a starter tool, and safe save-data scaffolding.",
+  "preset": "fullStarterGame",
+  "smoke": "regression"
+}

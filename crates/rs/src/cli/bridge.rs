@@ -1,7 +1,7 @@
 use crate::error::{AppError, AppResult};
 use crate::protocol::messages::{Envelope, StudioInfo};
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub fn status(port: u16, json: bool) -> AppResult<()> {
     let client = reqwest::blocking::Client::builder()
@@ -62,7 +62,22 @@ pub fn stop(port: u16) -> AppResult<()> {
             resp.status()
         )));
     }
-    println!("Bridge stopping.");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let health_url = format!("http://127.0.0.1:{port}/healthz");
+    while Instant::now() < deadline {
+        match client.get(&health_url).send() {
+            Ok(resp) if resp.status().is_success() => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            _ => {
+                println!("Bridge stopped.");
+                std::io::stdout().flush()?;
+                return Ok(());
+            }
+        }
+    }
+
+    println!("Bridge stopping; port {port} is still responding.");
     std::io::stdout().flush()?;
     Ok(())
 }
@@ -72,12 +87,19 @@ fn print_studios(studios: &[StudioInfo]) {
         println!("No Studios connected.");
         return;
     }
-    println!("{:<36}  {:<28}  {:>10}  Path", "ID", "Name", "Heartbeat");
+    println!(
+        "{:<36}  {:<28}  {:>8}  {:>10}  Path",
+        "ID", "Name", "Proto", "Heartbeat"
+    );
     for studio in studios {
         println!(
-            "{:<36}  {:<28}  {:>7}ms  {}",
+            "{:<36}  {:<28}  {:>8}  {:>7}ms  {}",
             studio.id,
             truncate(&studio.name, 28),
+            studio
+                .protocol_version
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "?".into()),
             studio.last_heartbeat_ms_ago,
             studio.place_file_path.as_deref().unwrap_or("")
         );

@@ -5,9 +5,12 @@ local Exporter = {}
 
 local ASSET_PROPERTIES = {
     AnimationId = "animation",
+    BottomImage = "image",
     Image = "image",
+    MidImage = "image",
     MeshId = "mesh",
     SoundId = "audio",
+    TopImage = "image",
     Texture = "image",
     TextureID = "image",
     TextureId = "image"

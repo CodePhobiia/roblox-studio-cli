@@ -1,4 +1,5 @@
 local AssetService = game:GetService("AssetService")
+local Ownership = require(script.Parent.Ownership)
 
 local ImportImage = {}
 
@@ -152,6 +153,7 @@ function ImportImage.import(payload, parent)
     end
 
     local name = sanitize(payload.name)
+    local sourceId = Ownership.sourceId(payload, "image")
     local container, guiRoot, containerErr = resolveContainer(parent, name)
     if not container then
         return nil, containerErr
@@ -189,6 +191,8 @@ function ImportImage.import(payload, parent)
     end
 
     imageObject.Parent = container
+    Ownership.stamp(guiRoot, sourceId)
+    Ownership.stamp(imageObject, sourceId)
 
     return imageObject, {
         rootPath = guiRoot:GetFullName(),
@@ -200,5 +204,10 @@ function ImportImage.import(payload, parent)
         warnings = {}
     }
 end
+
+ImportImage.sanitize = sanitize
+ImportImage.decodeBase64 = decodeBase64
+ImportImage.createEditableImage = createEditableImage
+ImportImage.createImageObject = createImageObject
 
 return ImportImage

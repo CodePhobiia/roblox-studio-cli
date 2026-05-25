@@ -1,6 +1,6 @@
 use crate::bridge::registry::Registry;
 use crate::error::{AppError, AppResult};
-use crate::protocol::messages::TransferRequest;
+use crate::protocol::messages::{TransferRequest, CLI_VERSION, PLUGIN_PROTOCOL_VERSION};
 use std::time::Duration;
 
 pub async fn run_transfer(
@@ -9,12 +9,24 @@ pub async fn run_transfer(
 ) -> AppResult<serde_json::Value> {
     let src_token = registry.resolve_token(Some(&req.from_studio)).await?;
     let dst_token = registry.resolve_token(Some(&req.to_studio)).await?;
+    registry
+        .ensure_protocol(&src_token, PLUGIN_PROTOCOL_VERSION)
+        .await?;
+    registry
+        .ensure_protocol(&dst_token, PLUGIN_PROTOCOL_VERSION)
+        .await?;
 
     let rx_serialize = registry
         .enqueue(
             &src_token,
             "serialize",
-            serde_json::json!({ "path": req.from_path }),
+            serde_json::json!({
+                "path": req.from_path,
+                "_rs": {
+                    "cliVersion": CLI_VERSION,
+                    "protocolVersion": PLUGIN_PROTOCOL_VERSION
+                }
+            }),
         )
         .await?;
     let serialize_result = tokio::time::timeout(Duration::from_secs(120), rx_serialize)
@@ -44,6 +56,13 @@ pub async fn run_transfer(
             serde_json::json!({
                 "parentPath": req.to_parent_path,
                 "blob": blob,
+                "conflictMode": req.conflict_mode,
+                "dryRun": req.dry_run,
+                "rollbackOnError": req.rollback_on_error,
+                "_rs": {
+                    "cliVersion": CLI_VERSION,
+                    "protocolVersion": PLUGIN_PROTOCOL_VERSION
+                }
             }),
         )
         .await?;

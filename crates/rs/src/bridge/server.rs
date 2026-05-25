@@ -2,8 +2,12 @@ use crate::bridge::orchestrator::run_transfer;
 use crate::bridge::registry::Registry;
 use crate::error::{AppError, AppResult};
 use crate::protocol::messages::{
-    CommandResult, Envelope, ExecRequest, ExportRequest, ImportAssetRequest, ImportImageRequest,
-    PluginCommand, ReadRequest, RegisterRequest, RegisterResponse, TransferRequest,
+    ApplyPlanRequest, AutopilotReviewRequest, CommandResult, CreateInstanceRequest, DepsRequest,
+    DeserializeRequest, Envelope, ExecRequest, ExportRequest, HistoryRequest, ImportAssetRequest,
+    ImportAudioRequest, ImportImageRequest, ImportUiPackRequest, ImportUploadedRequest,
+    PackageUpdateRequest, PluginCommand, ReadRequest, RegisterRequest, RegisterResponse,
+    RepairToolRequest, SerializeRequest, SnapshotRequest, TransferRequest, UpsertFilesRequest,
+    ValidateRequest, CLI_VERSION, PLUGIN_PROTOCOL_VERSION,
 };
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
@@ -55,6 +59,21 @@ fn build_router(state: AppState) -> Router {
         .route("/export", post(export))
         .route("/import-asset", post(import_asset))
         .route("/import-image", post(import_image))
+        .route("/import-uploaded", post(import_uploaded))
+        .route("/import-ui-pack", post(import_ui_pack))
+        .route("/import-audio", post(import_audio))
+        .route("/validate", post(validate))
+        .route("/repair-tool", post(repair_tool))
+        .route("/snapshot", post(snapshot))
+        .route("/create", post(create_instance))
+        .route("/upsert-files", post(upsert_files))
+        .route("/apply-plan", post(apply_plan))
+        .route("/package-update", post(package_update))
+        .route("/history", post(history))
+        .route("/deps", post(deps))
+        .route("/serialize", post(serialize))
+        .route("/deserialize", post(deserialize))
+        .route("/autopilot-review", post(autopilot_review))
         .route("/transfer", post(transfer))
         .route("/shutdown", post(shutdown))
         .with_state(state)
@@ -180,7 +199,8 @@ async fn import_asset(
             "name": req.name,
             "meshes": req.meshes,
             "anchored": req.anchored,
-            "weld": req.weld
+            "weld": req.weld,
+            "sourceId": req.source_id
         }),
         180,
     )
@@ -209,9 +229,351 @@ async fn import_image(
             "uiHeight": req.ui_height,
             "positionX": req.position_x,
             "positionY": req.position_y,
-            "pixelsBase64": req.pixels_base64
+            "pixelsBase64": req.pixels_base64,
+            "sourceId": req.source_id
         }),
         120,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn import_uploaded(
+    State(state): State<AppState>,
+    Json(req): Json<ImportUploadedRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "importUploaded",
+        serde_json::json!({
+            "parentPath": req.parent_path,
+            "kind": req.kind,
+            "name": req.name,
+            "assetId": req.asset_id,
+            "uiKind": req.ui_kind,
+            "uiWidth": req.ui_width,
+            "uiHeight": req.ui_height,
+            "positionX": req.position_x,
+            "positionY": req.position_y,
+            "volume": req.volume,
+            "playbackSpeed": req.playback_speed,
+            "looped": req.looped,
+            "sourceId": req.source_id
+        }),
+        60,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn import_ui_pack(
+    State(state): State<AppState>,
+    Json(req): Json<ImportUiPackRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "importUiPack",
+        serde_json::json!({
+            "parentPath": req.parent_path,
+            "name": req.name,
+            "elements": req.elements,
+            "sourceId": req.source_id
+        }),
+        180,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn import_audio(
+    State(state): State<AppState>,
+    Json(req): Json<ImportAudioRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "importAudio",
+        serde_json::json!({
+            "parentPath": req.parent_path,
+            "sounds": req.sounds,
+            "sourceId": req.source_id
+        }),
+        60,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn validate(
+    State(state): State<AppState>,
+    Json(req): Json<ValidateRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "validate",
+        serde_json::json!({ "path": req.path, "rules": req.rules }),
+        60,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn repair_tool(
+    State(state): State<AppState>,
+    Json(req): Json<RepairToolRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "repairTool",
+        serde_json::json!({
+            "path": req.path,
+            "handle": req.handle,
+            "dryRun": req.dry_run,
+            "replaceBroken": req.replace_broken,
+            "physicsFix": req.physics_fix,
+            "collision": req.collision,
+            "massless": req.massless
+        }),
+        60,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn snapshot(
+    State(state): State<AppState>,
+    Json(req): Json<SnapshotRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "snapshot",
+        serde_json::json!({ "path": req.path, "includePaths": req.include_paths }),
+        60,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn create_instance(
+    State(state): State<AppState>,
+    Json(req): Json<CreateInstanceRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "create",
+        serde_json::json!({
+            "parentPath": req.parent_path,
+            "className": req.class_name,
+            "name": req.name,
+            "properties": req.properties
+        }),
+        60,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn upsert_files(
+    State(state): State<AppState>,
+    Json(req): Json<UpsertFilesRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "upsertFiles",
+        serde_json::json!({
+            "parentPath": req.parent_path,
+            "dryRun": req.dry_run,
+            "delete": req.delete,
+            "items": req.items,
+            "force": req.force,
+            "sourceId": req.source_id
+        }),
+        120,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn apply_plan(
+    State(state): State<AppState>,
+    Json(req): Json<ApplyPlanRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "applyPlan",
+        serde_json::json!({
+            "rootPath": req.root_path,
+            "plan": req.plan,
+            "dryRun": req.dry_run,
+            "approved": req.approved,
+            "force": req.force,
+            "only": req.only,
+            "exclude": req.exclude
+        }),
+        180,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn package_update(
+    State(state): State<AppState>,
+    Json(req): Json<PackageUpdateRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "packageUpdate",
+        serde_json::json!({
+            "parentPath": req.parent_path,
+            "blob": req.blob,
+            "packageId": req.package_id,
+            "mode": req.mode,
+            "dryRun": req.dry_run,
+            "force": req.force
+        }),
+        240,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn history(
+    State(state): State<AppState>,
+    Json(req): Json<HistoryRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "history",
+        serde_json::json!({
+            "action": req.action,
+            "commandId": req.command_id
+        }),
+        120,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn deps(
+    State(state): State<AppState>,
+    Json(req): Json<DepsRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "deps",
+        serde_json::json!({ "path": req.path }),
+        90,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn serialize(
+    State(state): State<AppState>,
+    Json(req): Json<SerializeRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "serialize",
+        serde_json::json!({ "path": req.path }),
+        120,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn deserialize(
+    State(state): State<AppState>,
+    Json(req): Json<DeserializeRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "deserialize",
+        serde_json::json!({
+            "parentPath": req.parent_path,
+            "blob": req.blob,
+            "conflictMode": req.conflict_mode,
+            "dryRun": req.dry_run,
+            "rollbackOnError": req.rollback_on_error,
+            "packageId": req.package_id
+        }),
+        180,
+    )
+    .await
+    {
+        Ok(value) => Json(Envelope::ok(value)),
+        Err(err) => Json(Envelope::err(err.to_string(), err.bridge_code())),
+    }
+}
+
+async fn autopilot_review(
+    State(state): State<AppState>,
+    Json(req): Json<AutopilotReviewRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    match run_plugin_command(
+        &state.registry,
+        req.studio.as_deref(),
+        "autopilotReview",
+        serde_json::json!({
+            "action": req.action,
+            "run": req.run
+        }),
+        30,
     )
     .await
     {
@@ -241,10 +603,22 @@ async fn run_plugin_command(
     registry: &Registry,
     studio: Option<&str>,
     kind: &str,
-    payload: serde_json::Value,
+    mut payload: serde_json::Value,
     timeout_secs: u64,
 ) -> AppResult<serde_json::Value> {
     let token = registry.resolve_token(studio).await?;
+    registry
+        .ensure_protocol(&token, PLUGIN_PROTOCOL_VERSION)
+        .await?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "_rs".into(),
+            serde_json::json!({
+                "cliVersion": CLI_VERSION,
+                "protocolVersion": PLUGIN_PROTOCOL_VERSION
+            }),
+        );
+    }
     let rx = registry.enqueue(&token, kind, payload).await?;
     let result = tokio::time::timeout(Duration::from_secs(timeout_secs), rx)
         .await

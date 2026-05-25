@@ -1,18 +1,71 @@
 use crate::bridge::auto_spawn::ensure_bridge_running;
 use crate::error::{AppError, AppResult};
-use crate::protocol::messages::{Envelope, TransferRequest};
+use crate::protocol::messages::{DeserializeRequest, Envelope, SerializeRequest, TransferRequest};
 use std::io::Write;
 use std::time::Duration;
 
-pub fn run(port: u16, from: String, to: String) -> AppResult<()> {
+pub fn run(
+    port: u16,
+    from: String,
+    to: String,
+    dry_run: bool,
+    replace: bool,
+    rollback_on_error: bool,
+    image_rehost: Option<crate::cli::rehost_images::ImageRehostOptions>,
+) -> AppResult<()> {
     ensure_bridge_running(port)?;
     let (from_studio, from_path) = parse_studio_path(&from)?;
     let (to_studio, to_parent_path) = parse_studio_path(&to)?;
+    if let Some(mut image_rehost) = image_rehost {
+        image_rehost.dry_run = dry_run;
+        if dry_run {
+            println!("Planning transfer {from} -> {to}...");
+        } else {
+            println!("Transferring {from} -> {to}...");
+        }
+        let mut blob: serde_json::Value = crate::cli::request::post(
+            port,
+            "transfer serialize",
+            "/serialize",
+            &SerializeRequest {
+                studio: Some(from_studio),
+                path: from_path,
+            },
+            180,
+        )?;
+        let image_rehost_report =
+            crate::cli::rehost_images::rehost_image_refs_in_blob(&mut blob, &image_rehost)?;
+        let data: serde_json::Value = crate::cli::request::post(
+            port,
+            "transfer deserialize",
+            "/deserialize",
+            &DeserializeRequest {
+                studio: Some(to_studio),
+                parent_path: to_parent_path,
+                blob,
+                conflict_mode: replace.then_some("replace".to_string()),
+                dry_run,
+                rollback_on_error,
+                package_id: None,
+            },
+            210,
+        )?;
+        print_transfer_result(dry_run, &data);
+        crate::cli::rehost_images::print_rehost_summary(&image_rehost_report);
+        print_warnings(&data);
+        std::io::stdout().flush()?;
+        return Ok(());
+    }
+
     let url = format!("http://127.0.0.1:{port}/transfer");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
         .build()?;
-    println!("Transferring {from} -> {to}...");
+    if dry_run {
+        println!("Planning transfer {from} -> {to}...");
+    } else {
+        println!("Transferring {from} -> {to}...");
+    }
     let resp = client
         .post(&url)
         .json(&TransferRequest {
@@ -20,6 +73,9 @@ pub fn run(port: u16, from: String, to: String) -> AppResult<()> {
             from_path,
             to_studio,
             to_parent_path,
+            conflict_mode: replace.then_some("replace".to_string()),
+            dry_run,
+            rollback_on_error,
         })
         .send()
         .map_err(|source| AppError::BridgeUnreachable {
@@ -32,11 +88,23 @@ pub fn run(port: u16, from: String, to: String) -> AppResult<()> {
     }
 
     let data = env.data.unwrap_or_else(|| serde_json::json!({}));
-    if let Some(root_path) = data.get("rootPath").and_then(|v| v.as_str()) {
+    print_transfer_result(dry_run, &data);
+    print_warnings(&data);
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn print_transfer_result(dry_run: bool, data: &serde_json::Value) {
+    if dry_run {
+        println!("OK: dry-run complete");
+    } else if let Some(root_path) = data.get("rootPath").and_then(|v| v.as_str()) {
         println!("OK: created at {root_path}");
     } else {
         println!("OK");
     }
+}
+
+fn print_warnings(data: &serde_json::Value) {
     if let Some(warnings) = data.get("warnings").and_then(|v| v.as_array()) {
         if !warnings.is_empty() {
             println!("Warnings ({}):", warnings.len());
@@ -48,8 +116,6 @@ pub fn run(port: u16, from: String, to: String) -> AppResult<()> {
             }
         }
     }
-    std::io::stdout().flush()?;
-    Ok(())
 }
 
 fn parse_studio_path(input: &str) -> AppResult<(String, String)> {

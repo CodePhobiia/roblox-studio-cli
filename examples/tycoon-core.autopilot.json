@@ -1,0 +1,7 @@
+{
+  "kind": "tycoonCore",
+  "name": "TycoonBase",
+  "currencyName": "Cash",
+  "dropValue": 10,
+  "upgradePrice": 100
+}

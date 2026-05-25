@@ -27,12 +27,19 @@ pub fn run(port: u16, json: bool) -> AppResult<()> {
     } else if studios.is_empty() {
         println!("No Studios connected.");
     } else {
-        println!("{:<36}  {:<28}  {:>10}  Path", "ID", "Name", "Heartbeat");
+        println!(
+            "{:<36}  {:<28}  {:>8}  {:>10}  Path",
+            "ID", "Name", "Proto", "Heartbeat"
+        );
         for studio in studios {
             println!(
-                "{:<36}  {:<28}  {:>7}ms  {}",
+                "{:<36}  {:<28}  {:>8}  {:>7}ms  {}",
                 studio.id,
                 truncate(&studio.name, 28),
+                studio
+                    .protocol_version
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "?".into()),
                 studio.last_heartbeat_ms_ago,
                 studio.place_file_path.as_deref().unwrap_or("")
             );

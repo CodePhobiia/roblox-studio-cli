@@ -1,4 +1,6 @@
-/target
+target/
+crates/*/target/
+.rs/
 **/*.rs.bk
 Cargo.lock.bak
 .rs-bridge.log

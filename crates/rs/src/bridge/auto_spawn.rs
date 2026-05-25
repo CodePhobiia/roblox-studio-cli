@@ -10,7 +10,7 @@ pub fn ensure_bridge_running(port: u16) -> AppResult<()> {
     }
 
     let log_path = spawn_bridge(port)?;
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline {
         if probe(&url) {
             return Ok(());
@@ -52,7 +52,10 @@ fn spawn_bridge(port: u16) -> AppResult<String> {
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
-        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        command.creation_flags(
+            CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB,
+        );
     }
 
     command.spawn()?;

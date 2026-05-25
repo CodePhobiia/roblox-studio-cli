@@ -1,0 +1,17 @@
+{
+  "kind": "starterShop",
+  "name": "Shop",
+  "currencyName": "Coins",
+  "items": [
+    {
+      "id": "speed_boost",
+      "displayName": "Speed Boost",
+      "price": 100
+    },
+    {
+      "id": "double_jump",
+      "displayName": "Double Jump",
+      "price": 250
+    }
+  ]
+}
