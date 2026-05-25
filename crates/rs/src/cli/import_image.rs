@@ -1,10 +1,8 @@
-use crate::bridge::auto_spawn::ensure_bridge_running;
 use crate::error::{AppError, AppResult};
-use crate::protocol::messages::{Envelope, ImportImageRequest, ImportImageResponse};
+use crate::protocol::messages::{ImportImageRequest, ImportImageResponse};
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 const MAX_EDITABLE_IMAGE_DIMENSION: u32 = 1024;
 
@@ -27,14 +25,11 @@ pub fn run(
     };
     let (position_x, position_y) = parse_position(&position)?;
 
-    ensure_bridge_running(port)?;
-    let url = format!("http://127.0.0.1:{port}/import-image");
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(150))
-        .build()?;
-    let resp = client
-        .post(&url)
-        .json(&ImportImageRequest {
+    let response: ImportImageResponse = crate::cli::request::post(
+        port,
+        "import-image",
+        "/import-image",
+        &ImportImageRequest {
             studio,
             parent_path,
             name: import_name,
@@ -47,24 +42,9 @@ pub fn run(
             position_y,
             pixels_base64: encode_base64(&image.rgba),
             source_id: None,
-        })
-        .send()
-        .map_err(|source| AppError::BridgeUnreachable {
-            url: url.clone(),
-            source,
-        })?;
-    let env: Envelope<ImportImageResponse> = resp.json()?;
-    if !env.ok {
-        return Err(crate::cli::envelope_error(
-            "import-image",
-            env.error,
-            env.code,
-        ));
-    }
-
-    let response = env
-        .data
-        .ok_or_else(|| AppError::Other("import-image returned no data".into()))?;
+        },
+        150,
+    )?;
     println!(
         "Imported {}x{} PNG as {} at {}",
         response.width, response.height, response.class_name, response.image_path

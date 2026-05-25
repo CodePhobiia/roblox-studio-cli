@@ -1,8 +1,6 @@
-use crate::bridge::auto_spawn::ensure_bridge_running;
 use crate::error::{AppError, AppResult};
-use crate::protocol::messages::{DeserializeRequest, Envelope, SerializeRequest, TransferRequest};
+use crate::protocol::messages::{DeserializeRequest, SerializeRequest, TransferRequest};
 use std::io::Write;
-use std::time::Duration;
 
 pub fn run(
     port: u16,
@@ -13,7 +11,6 @@ pub fn run(
     rollback_on_error: bool,
     image_rehost: Option<crate::cli::rehost_images::ImageRehostOptions>,
 ) -> AppResult<()> {
-    ensure_bridge_running(port)?;
     let (from_studio, from_path) = parse_studio_path(&from)?;
     let (to_studio, to_parent_path) = parse_studio_path(&to)?;
     if let Some(mut image_rehost) = image_rehost {
@@ -57,18 +54,16 @@ pub fn run(
         return Ok(());
     }
 
-    let url = format!("http://127.0.0.1:{port}/transfer");
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(180))
-        .build()?;
     if dry_run {
         println!("Planning transfer {from} -> {to}...");
     } else {
         println!("Transferring {from} -> {to}...");
     }
-    let resp = client
-        .post(&url)
-        .json(&TransferRequest {
+    let data: serde_json::Value = crate::cli::request::post(
+        port,
+        "transfer",
+        "/transfer",
+        &TransferRequest {
             from_studio,
             from_path,
             to_studio,
@@ -76,18 +71,10 @@ pub fn run(
             conflict_mode: replace.then_some("replace".to_string()),
             dry_run,
             rollback_on_error,
-        })
-        .send()
-        .map_err(|source| AppError::BridgeUnreachable {
-            url: url.clone(),
-            source,
-        })?;
-    let env: Envelope<serde_json::Value> = resp.json()?;
-    if !env.ok {
-        return Err(crate::cli::envelope_error("transfer", env.error, env.code));
-    }
+        },
+        180,
+    )?;
 
-    let data = env.data.unwrap_or_else(|| serde_json::json!({}));
     print_transfer_result(dry_run, &data);
     print_warnings(&data);
     std::io::stdout().flush()?;

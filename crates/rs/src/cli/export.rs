@@ -1,11 +1,9 @@
-use crate::bridge::auto_spawn::ensure_bridge_running;
 use crate::error::{AppError, AppResult};
-use crate::protocol::messages::{Envelope, ExportFile, ExportRequest, ExportResponse};
+use crate::protocol::messages::{ExportFile, ExportRequest, ExportResponse};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
 
 pub fn run(
     port: u16,
@@ -15,31 +13,17 @@ pub fn run(
     depth: Option<u32>,
     overwrite: bool,
 ) -> AppResult<()> {
-    ensure_bridge_running(port)?;
-    let url = format!("http://127.0.0.1:{port}/export");
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(180))
-        .build()?;
-    let resp = client
-        .post(&url)
-        .json(&ExportRequest {
+    let response: ExportResponse = crate::cli::request::post(
+        port,
+        "export",
+        "/export",
+        &ExportRequest {
             studio,
             path,
             depth,
-        })
-        .send()
-        .map_err(|source| AppError::BridgeUnreachable {
-            url: url.clone(),
-            source,
-        })?;
-    let env: Envelope<ExportResponse> = resp.json()?;
-    if !env.ok {
-        return Err(crate::cli::envelope_error("export", env.error, env.code));
-    }
-
-    let response = env
-        .data
-        .ok_or_else(|| AppError::Other("export returned no data".into()))?;
+        },
+        180,
+    )?;
     let mut counts = BTreeMap::<String, usize>::new();
     fs::create_dir_all(&out)?;
 

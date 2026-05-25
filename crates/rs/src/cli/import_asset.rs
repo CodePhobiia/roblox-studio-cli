@@ -1,12 +1,11 @@
-use crate::bridge::auto_spawn::ensure_bridge_running;
 use crate::error::{AppError, AppResult};
-use crate::protocol::messages::{Envelope, ImportAssetRequest, ImportAssetResponse, ImportMesh};
+use crate::protocol::messages::{ImportAssetRequest, ImportAssetResponse, ImportMesh};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn run(
     port: u16,
@@ -34,14 +33,11 @@ pub fn run(
         ));
     }
 
-    ensure_bridge_running(port)?;
-    let url = format!("http://127.0.0.1:{port}/import-asset");
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(210))
-        .build()?;
-    let resp = client
-        .post(&url)
-        .json(&ImportAssetRequest {
+    let response: ImportAssetResponse = crate::cli::request::post(
+        port,
+        "import-asset",
+        "/import-asset",
+        &ImportAssetRequest {
             studio,
             parent_path,
             name: import_name,
@@ -49,24 +45,9 @@ pub fn run(
             anchored,
             weld,
             source_id: None,
-        })
-        .send()
-        .map_err(|source| AppError::BridgeUnreachable {
-            url: url.clone(),
-            source,
-        })?;
-    let env: Envelope<ImportAssetResponse> = resp.json()?;
-    if !env.ok {
-        return Err(crate::cli::envelope_error(
-            "import-asset",
-            env.error,
-            env.code,
-        ));
-    }
-
-    let response = env
-        .data
-        .ok_or_else(|| AppError::Other("import-asset returned no data".into()))?;
+        },
+        210,
+    )?;
     println!(
         "Imported {} mesh(es), {} part(s), {} weld(s) at {}",
         response.mesh_count, response.part_count, response.weld_count, response.root_path
