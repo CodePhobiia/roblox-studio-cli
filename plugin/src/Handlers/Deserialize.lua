@@ -1,35 +1,7 @@
 local Deserializer = require(script.Parent.Parent.Deserializer)
 local Ownership = require(script.Parent.Parent.Ownership)
-
-local function splitPath(path)
-    local parts = {}
-    for part in string.gmatch(path, "[^%.]+") do
-        table.insert(parts, part)
-    end
-    return parts
-end
-
-local function resolvePath(path)
-    local node = game
-    for i, part in ipairs(splitPath(path)) do
-        if i == 1 then
-            local service = game:FindFirstChild(part)
-            if not service then
-                local ok, result = pcall(function()
-                    return game:GetService(part)
-                end)
-                service = ok and result or nil
-            end
-            node = service
-        else
-            node = node and node:FindFirstChild(part)
-        end
-        if not node then
-            return nil
-        end
-    end
-    return node
-end
+local Inspector = require(script.Parent.Parent.Inspector)
+local StudioPath = require(script.Parent.Parent.StudioPath)
 
 local function rootNameFromBlob(blob)
     local rootSpec = blob.instances and blob.instances[blob.root]
@@ -63,6 +35,46 @@ local function mergeInto(existing, imported)
     return existing
 end
 
+local function blockingExternalReferences(blob)
+    local blocked = {}
+    for _, ref in ipairs(type(blob.externalReferences) == "table" and blob.externalReferences or {}) do
+        if type(ref) == "table" and ref.blocking == true then
+            table.insert(blocked, ref)
+        end
+    end
+    return blocked
+end
+
+local function summarizeExternalReferences(blocked)
+    local parts = {}
+    for _, ref in ipairs(blocked) do
+        table.insert(parts, tostring(ref.path) .. "." .. tostring(ref.property) .. " -> " .. tostring(ref.targetPath))
+        if #parts >= 5 then
+            break
+        end
+    end
+    if #blocked > #parts then
+        table.insert(parts, "... " .. tostring(#blocked - #parts) .. " more")
+    end
+    return table.concat(parts, "; ")
+end
+
+local function validationFailed(validation)
+    local summary = type(validation) == "table" and validation.summary or nil
+    return type(summary) == "table" and tonumber(summary.fail) and tonumber(summary.fail) > 0
+end
+
+local function rollbackCreated(root, parent, backup)
+    if root then
+        pcall(function()
+            root:Destroy()
+        end)
+    end
+    if backup then
+        backup.Parent = parent
+    end
+end
+
 local function deserializeHandler(payload)
     if type(payload.parentPath) ~= "string" then
         return { ok = false, error = "parentPath missing" }
@@ -71,15 +83,22 @@ local function deserializeHandler(payload)
         return { ok = false, error = "blob missing" }
     end
 
-    local parent = resolvePath(payload.parentPath)
+    local parent, resolveErr = StudioPath.resolve(payload.parentPath)
     if not parent then
-        return { ok = false, error = "parent path not found: " .. payload.parentPath }
+        return { ok = false, error = resolveErr or ("parent path not found: " .. payload.parentPath) }
     end
 
     local conflictMode = tostring(payload.conflictMode or "allow")
     local rootName = rootNameFromBlob(payload.blob)
     local existing = parent:FindFirstChild(rootName)
     local existingBackup = nil
+    local externalFailures = blockingExternalReferences(payload.blob)
+    if payload.failOnExternalRefs == true and #externalFailures > 0 then
+        return {
+            ok = false,
+            error = "transfer has external rigid references outside the selected root: " .. summarizeExternalReferences(externalFailures)
+        }
+    end
     if payload.dryRun == true then
         return {
             ok = true,
@@ -88,6 +107,7 @@ local function deserializeHandler(payload)
                 dryRun = true,
                 conflict = existing ~= nil,
                 conflictMode = conflictMode,
+                externalReferences = payload.blob.externalReferences or {},
                 warnings = existing and { "existing child named " .. rootName .. " would trigger conflict mode " .. conflictMode } or {}
             }
         }
@@ -95,7 +115,7 @@ local function deserializeHandler(payload)
     if existing then
         if conflictMode == "fail" then
             return { ok = false, error = "destination already has child named " .. rootName }
-        elseif conflictMode == "replace" then
+        elseif conflictMode == "replace" or conflictMode == "merge" then
             if payload.rollbackOnError == true then
                 local okClone, cloneOrErr = pcall(function()
                     return existing:Clone()
@@ -104,7 +124,9 @@ local function deserializeHandler(payload)
                     existingBackup = cloneOrErr
                 end
             end
-            existing:Destroy()
+            if conflictMode == "replace" then
+                existing:Destroy()
+            end
         elseif conflictMode ~= "rename" and conflictMode ~= "merge" and conflictMode ~= "allow" then
             return { ok = false, error = "unknown conflictMode: " .. conflictMode }
         end
@@ -116,9 +138,6 @@ local function deserializeHandler(payload)
             existingBackup.Parent = parent
         end
         return { ok = false, error = warningsOrErr }
-    end
-    if existingBackup then
-        existingBackup:Destroy()
     end
     if existing and conflictMode == "rename" then
         root.Name = uniqueName(parent, rootName)
@@ -136,7 +155,35 @@ local function deserializeHandler(payload)
             Ownership.stamp(descendant, sourceId, payload.packageId)
         end
     end
-    return { ok = true, data = { rootPath = root:GetFullName(), warnings = warningsOrErr or {} } }
+
+    local validation = nil
+    if type(payload.validateRules) == "table" and #payload.validateRules > 0 then
+        validation = Inspector.validate(root, payload.validateRules)
+        if payload.failOnValidationFailure == true and validationFailed(validation) then
+            if payload.rollbackOnError == true then
+                rollbackCreated(root, parent, existingBackup)
+            elseif existingBackup then
+                existingBackup:Destroy()
+            end
+            return {
+                ok = false,
+                error = "post-deserialize validation failed with " .. tostring(validation.summary.fail) .. " failing diagnostic(s)"
+            }
+        end
+    end
+
+    if existingBackup then
+        existingBackup:Destroy()
+    end
+    return {
+        ok = true,
+        data = {
+            rootPath = root:GetFullName(),
+            warnings = warningsOrErr or {},
+            validation = validation,
+            externalReferences = payload.blob.externalReferences or {}
+        }
+    }
 end
 
 return deserializeHandler

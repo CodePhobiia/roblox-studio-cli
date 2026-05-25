@@ -134,6 +134,8 @@ pub struct TransferRequest {
     pub dry_run: bool,
     #[serde(default)]
     pub rollback_on_error: bool,
+    #[serde(default)]
+    pub allow_external_refs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +263,12 @@ pub struct DeserializeRequest {
     pub rollback_on_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validate_rules: Vec<String>,
+    #[serde(default)]
+    pub fail_on_validation_failure: bool,
+    #[serde(default)]
+    pub fail_on_external_refs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

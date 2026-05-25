@@ -62,6 +62,9 @@ pub fn restore_run(
             dry_run: false,
             rollback_on_error: true,
             package_id: None,
+            validate_rules: Vec::new(),
+            fail_on_validation_failure: false,
+            fail_on_external_refs: false,
         },
         240,
     )?;

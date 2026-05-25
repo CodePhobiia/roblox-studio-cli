@@ -186,6 +186,8 @@ A single-binary CLI plus Luau Studio plugin for programmatic Roblox Studio contr
 
 The bridge listens on `127.0.0.1:7878` by default and can be changed with `--port` or `RS_BRIDGE_PORT`. CLI-facing bridge routes require a local token sent by the `rs` binary. Set `RS_BRIDGE_TOKEN` only for trusted local tooling that must call the bridge directly.
 
+Transfers validate refs, welds, and Tools after deserialize. If a weld or attachment constraint points outside the selected source root, transfer a common parent containing both endpoints or pass `--allow-external-refs` to accept the missing link intentionally.
+
 ## Build
 
 ```powershell

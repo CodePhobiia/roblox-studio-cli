@@ -1650,36 +1650,8 @@ return depsHandler
           <string name="Name">Deserialize</string>
           <string name="Source"><![CDATA[local Deserializer = require(script.Parent.Parent.Deserializer)
 local Ownership = require(script.Parent.Parent.Ownership)
-
-local function splitPath(path)
-    local parts = {}
-    for part in string.gmatch(path, "[^%.]+") do
-        table.insert(parts, part)
-    end
-    return parts
-end
-
-local function resolvePath(path)
-    local node = game
-    for i, part in ipairs(splitPath(path)) do
-        if i == 1 then
-            local service = game:FindFirstChild(part)
-            if not service then
-                local ok, result = pcall(function()
-                    return game:GetService(part)
-                end)
-                service = ok and result or nil
-            end
-            node = service
-        else
-            node = node and node:FindFirstChild(part)
-        end
-        if not node then
-            return nil
-        end
-    end
-    return node
-end
+local Inspector = require(script.Parent.Parent.Inspector)
+local StudioPath = require(script.Parent.Parent.StudioPath)
 
 local function rootNameFromBlob(blob)
     local rootSpec = blob.instances and blob.instances[blob.root]
@@ -1713,6 +1685,46 @@ local function mergeInto(existing, imported)
     return existing
 end
 
+local function blockingExternalReferences(blob)
+    local blocked = {}
+    for _, ref in ipairs(type(blob.externalReferences) == "table" and blob.externalReferences or {}) do
+        if type(ref) == "table" and ref.blocking == true then
+            table.insert(blocked, ref)
+        end
+    end
+    return blocked
+end
+
+local function summarizeExternalReferences(blocked)
+    local parts = {}
+    for _, ref in ipairs(blocked) do
+        table.insert(parts, tostring(ref.path) .. "." .. tostring(ref.property) .. " -> " .. tostring(ref.targetPath))
+        if #parts >= 5 then
+            break
+        end
+    end
+    if #blocked > #parts then
+        table.insert(parts, "... " .. tostring(#blocked - #parts) .. " more")
+    end
+    return table.concat(parts, "; ")
+end
+
+local function validationFailed(validation)
+    local summary = type(validation) == "table" and validation.summary or nil
+    return type(summary) == "table" and tonumber(summary.fail) and tonumber(summary.fail) > 0
+end
+
+local function rollbackCreated(root, parent, backup)
+    if root then
+        pcall(function()
+            root:Destroy()
+        end)
+    end
+    if backup then
+        backup.Parent = parent
+    end
+end
+
 local function deserializeHandler(payload)
     if type(payload.parentPath) ~= "string" then
         return { ok = false, error = "parentPath missing" }
@@ -1721,15 +1733,22 @@ local function deserializeHandler(payload)
         return { ok = false, error = "blob missing" }
     end
 
-    local parent = resolvePath(payload.parentPath)
+    local parent, resolveErr = StudioPath.resolve(payload.parentPath)
     if not parent then
-        return { ok = false, error = "parent path not found: " .. payload.parentPath }
+        return { ok = false, error = resolveErr or ("parent path not found: " .. payload.parentPath) }
     end
 
     local conflictMode = tostring(payload.conflictMode or "allow")
     local rootName = rootNameFromBlob(payload.blob)
     local existing = parent:FindFirstChild(rootName)
     local existingBackup = nil
+    local externalFailures = blockingExternalReferences(payload.blob)
+    if payload.failOnExternalRefs == true and #externalFailures > 0 then
+        return {
+            ok = false,
+            error = "transfer has external rigid references outside the selected root: " .. summarizeExternalReferences(externalFailures)
+        }
+    end
     if payload.dryRun == true then
         return {
             ok = true,
@@ -1738,6 +1757,7 @@ local function deserializeHandler(payload)
                 dryRun = true,
                 conflict = existing ~= nil,
                 conflictMode = conflictMode,
+                externalReferences = payload.blob.externalReferences or {},
                 warnings = existing and { "existing child named " .. rootName .. " would trigger conflict mode " .. conflictMode } or {}
             }
         }
@@ -1745,7 +1765,7 @@ local function deserializeHandler(payload)
     if existing then
         if conflictMode == "fail" then
             return { ok = false, error = "destination already has child named " .. rootName }
-        elseif conflictMode == "replace" then
+        elseif conflictMode == "replace" or conflictMode == "merge" then
             if payload.rollbackOnError == true then
                 local okClone, cloneOrErr = pcall(function()
                     return existing:Clone()
@@ -1754,7 +1774,9 @@ local function deserializeHandler(payload)
                     existingBackup = cloneOrErr
                 end
             end
-            existing:Destroy()
+            if conflictMode == "replace" then
+                existing:Destroy()
+            end
         elseif conflictMode ~= "rename" and conflictMode ~= "merge" and conflictMode ~= "allow" then
             return { ok = false, error = "unknown conflictMode: " .. conflictMode }
         end
@@ -1766,9 +1788,6 @@ local function deserializeHandler(payload)
             existingBackup.Parent = parent
         end
         return { ok = false, error = warningsOrErr }
-    end
-    if existingBackup then
-        existingBackup:Destroy()
     end
     if existing and conflictMode == "rename" then
         root.Name = uniqueName(parent, rootName)
@@ -1786,7 +1805,35 @@ local function deserializeHandler(payload)
             Ownership.stamp(descendant, sourceId, payload.packageId)
         end
     end
-    return { ok = true, data = { rootPath = root:GetFullName(), warnings = warningsOrErr or {} } }
+
+    local validation = nil
+    if type(payload.validateRules) == "table" and #payload.validateRules > 0 then
+        validation = Inspector.validate(root, payload.validateRules)
+        if payload.failOnValidationFailure == true and validationFailed(validation) then
+            if payload.rollbackOnError == true then
+                rollbackCreated(root, parent, existingBackup)
+            elseif existingBackup then
+                existingBackup:Destroy()
+            end
+            return {
+                ok = false,
+                error = "post-deserialize validation failed with " .. tostring(validation.summary.fail) .. " failing diagnostic(s)"
+            }
+        end
+    end
+
+    if existingBackup then
+        existingBackup:Destroy()
+    end
+    return {
+        ok = true,
+        data = {
+            rootPath = root:GetFullName(),
+            warnings = warningsOrErr or {},
+            validation = validation,
+            externalReferences = payload.blob.externalReferences or {}
+        }
+    }
 end
 
 return deserializeHandler
@@ -1839,49 +1886,16 @@ return execHandler
         <Properties>
           <string name="Name">Export</string>
           <string name="Source"><![CDATA[local Exporter = require(script.Parent.Parent.Exporter)
-
-local function splitPath(path)
-    local parts = {}
-    for part in string.gmatch(path, "[^%.]+") do
-        table.insert(parts, part)
-    end
-    return parts
-end
-
-local function resolvePath(path)
-    if path == "game" or path == "DataModel" then
-        return game
-    end
-
-    local node = game
-    for i, part in ipairs(splitPath(path)) do
-        if i == 1 then
-            local service = game:FindFirstChild(part)
-            if not service then
-                local ok, result = pcall(function()
-                    return game:GetService(part)
-                end)
-                service = ok and result or nil
-            end
-            node = service
-        else
-            node = node and node:FindFirstChild(part)
-        end
-        if not node then
-            return nil
-        end
-    end
-    return node
-end
+local StudioPath = require(script.Parent.Parent.StudioPath)
 
 local function exportHandler(payload)
     if type(payload.path) ~= "string" then
         return { ok = false, error = "path missing" }
     end
 
-    local target = resolvePath(payload.path)
+    local target, err = StudioPath.resolve(payload.path)
     if not target then
-        return { ok = false, error = "path not found: " .. payload.path }
+        return { ok = false, error = err or ("path not found: " .. payload.path) }
     end
 
     local depth = nil
@@ -1938,40 +1952,7 @@ return historyHandler
         <Properties>
           <string name="Name">ImportAsset</string>
           <string name="Source"><![CDATA[local Importer = require(script.Parent.Parent.Importer)
-
-local function splitPath(path)
-    local parts = {}
-    for part in string.gmatch(path, "[^%.]+") do
-        table.insert(parts, part)
-    end
-    return parts
-end
-
-local function resolvePath(path)
-    if path == "game" or path == "DataModel" then
-        return game
-    end
-
-    local node = game
-    for i, part in ipairs(splitPath(path)) do
-        if i == 1 then
-            local service = game:FindFirstChild(part)
-            if not service then
-                local ok, result = pcall(function()
-                    return game:GetService(part)
-                end)
-                service = ok and result or nil
-            end
-            node = service
-        else
-            node = node and node:FindFirstChild(part)
-        end
-        if not node then
-            return nil
-        end
-    end
-    return node
-end
+local StudioPath = require(script.Parent.Parent.StudioPath)
 
 local function importAssetHandler(payload)
     if type(payload.parentPath) ~= "string" then
@@ -1984,9 +1965,9 @@ local function importAssetHandler(payload)
         return { ok = false, error = "meshes missing" }
     end
 
-    local parent = resolvePath(payload.parentPath)
+    local parent, err = StudioPath.resolve(payload.parentPath)
     if not parent then
-        return { ok = false, error = "parent path not found: " .. payload.parentPath }
+        return { ok = false, error = err or ("parent path not found: " .. payload.parentPath) }
     end
 
     local root, dataOrErr = Importer.import(payload, parent)
@@ -2080,40 +2061,7 @@ return importAudioHandler
         <Properties>
           <string name="Name">ImportImage</string>
           <string name="Source"><![CDATA[local ImportImage = require(script.Parent.Parent.ImportImage)
-
-local function splitPath(path)
-    local parts = {}
-    for part in string.gmatch(path, "[^%.]+") do
-        table.insert(parts, part)
-    end
-    return parts
-end
-
-local function resolvePath(path)
-    if path == "game" or path == "DataModel" then
-        return game
-    end
-
-    local node = game
-    for i, part in ipairs(splitPath(path)) do
-        if i == 1 then
-            local service = game:FindFirstChild(part)
-            if not service then
-                local ok, result = pcall(function()
-                    return game:GetService(part)
-                end)
-                service = ok and result or nil
-            end
-            node = service
-        else
-            node = node and node:FindFirstChild(part)
-        end
-        if not node then
-            return nil
-        end
-    end
-    return node
-end
+local StudioPath = require(script.Parent.Parent.StudioPath)
 
 local function importImageHandler(payload)
     if type(payload.parentPath) ~= "string" then
@@ -2126,9 +2074,9 @@ local function importImageHandler(payload)
         return { ok = false, error = "kind missing" }
     end
 
-    local parent = resolvePath(payload.parentPath)
+    local parent, err = StudioPath.resolve(payload.parentPath)
     if not parent then
-        return { ok = false, error = "parent path not found: " .. payload.parentPath }
+        return { ok = false, error = err or ("parent path not found: " .. payload.parentPath) }
     end
 
     local imageObject, dataOrErr = ImportImage.import(payload, parent)
@@ -2654,48 +2602,15 @@ return packageUpdateHandler
         <Properties>
           <string name="Name">Read</string>
           <string name="Source"><![CDATA[local Serializer = require(script.Parent.Parent.Serializer)
-
-local function splitPath(path)
-    local parts = {}
-    for part in string.gmatch(path, "[^%.]+") do
-        table.insert(parts, part)
-    end
-    return parts
-end
-
-local function resolvePath(path)
-    if path == "game" or path == "DataModel" then
-        return game
-    end
-
-    local node = game
-    for i, part in ipairs(splitPath(path)) do
-        if i == 1 then
-            local service = game:FindFirstChild(part)
-            if not service then
-                local ok, result = pcall(function()
-                    return game:GetService(part)
-                end)
-                service = ok and result or nil
-            end
-            node = service
-        else
-            node = node and node:FindFirstChild(part)
-        end
-        if not node then
-            return nil
-        end
-    end
-    return node
-end
+local StudioPath = require(script.Parent.Parent.StudioPath)
 
 local function readHandler(payload)
     if type(payload.path) ~= "string" then
         return { ok = false, error = "path missing" }
     end
-    local target = resolvePath(payload.path)
+    local target, err = StudioPath.resolve(payload.path)
     if not target then
-        return { ok = false, error = "path not found: " .. payload.path }
+        return { ok = false, error = err or ("path not found: " .. payload.path) }
     end
     return { ok = true, data = Serializer.readInstance(target, tonumber(payload.depth) or 3) }
 end
@@ -2737,44 +2652,15 @@ return repairToolHandler
         <Properties>
           <string name="Name">Serialize</string>
           <string name="Source"><![CDATA[local Serializer = require(script.Parent.Parent.Serializer)
-
-local function splitPath(path)
-    local parts = {}
-    for part in string.gmatch(path, "[^%.]+") do
-        table.insert(parts, part)
-    end
-    return parts
-end
-
-local function resolvePath(path)
-    local node = game
-    for i, part in ipairs(splitPath(path)) do
-        if i == 1 then
-            local service = game:FindFirstChild(part)
-            if not service then
-                local ok, result = pcall(function()
-                    return game:GetService(part)
-                end)
-                service = ok and result or nil
-            end
-            node = service
-        else
-            node = node and node:FindFirstChild(part)
-        end
-        if not node then
-            return nil
-        end
-    end
-    return node
-end
+local StudioPath = require(script.Parent.Parent.StudioPath)
 
 local function serializeHandler(payload)
     if type(payload.path) ~= "string" then
         return { ok = false, error = "path missing" }
     end
-    local target = resolvePath(payload.path)
+    local target, err = StudioPath.resolve(payload.path)
     if not target then
-        return { ok = false, error = "path not found: " .. payload.path }
+        return { ok = false, error = err or ("path not found: " .. payload.path) }
     end
     return { ok = true, data = Serializer.serialize(target) }
 end
@@ -3647,9 +3533,12 @@ local ASSET_PROPERTIES = {
 
 local REF_PROPERTIES = {
     Weld = { "Part0", "Part1" },
+    ManualWeld = { "Part0", "Part1" },
+    Motor = { "Part0", "Part1" },
     Motor6D = { "Part0", "Part1" },
     Snap = { "Part0", "Part1" },
     WeldConstraint = { "Part0", "Part1" },
+    NoCollisionConstraint = { "Part0", "Part1" },
     ObjectValue = { "Value" },
     SurfaceGui = { "Adornee" },
     BillboardGui = { "Adornee" },
@@ -3657,14 +3546,26 @@ local REF_PROPERTIES = {
     Trail = { "Attachment0", "Attachment1" },
     HingeConstraint = { "Attachment0", "Attachment1" },
     BallSocketConstraint = { "Attachment0", "Attachment1" },
+    RigidConstraint = { "Attachment0", "Attachment1" },
+    RodConstraint = { "Attachment0", "Attachment1" },
+    PrismaticConstraint = { "Attachment0", "Attachment1" },
+    CylindricalConstraint = { "Attachment0", "Attachment1" },
+    UniversalConstraint = { "Attachment0", "Attachment1" },
     AlignPosition = { "Attachment0", "Attachment1" },
     AlignOrientation = { "Attachment0", "Attachment1" },
+    LinearVelocity = { "Attachment0", "Attachment1" },
+    AngularVelocity = { "Attachment0" },
+    VectorForce = { "Attachment0" },
+    Torque = { "Attachment0" },
+    LineForce = { "Attachment0", "Attachment1" },
     RopeConstraint = { "Attachment0", "Attachment1" },
     SpringConstraint = { "Attachment0", "Attachment1" }
 }
 
 local RIGID_JOINT_CLASSES = {
     Weld = true,
+    ManualWeld = true,
+    Motor = true,
     Motor6D = true,
     Snap = true,
     WeldConstraint = true
@@ -4439,9 +4340,13 @@ local byClass = {
     MeshPart = { "MeshId", "TextureID", "CollisionFidelity", "DoubleSided", "RenderFidelity" },
     SpecialMesh = { "MeshId", "MeshType", "Offset", "Scale", "TextureId", "VertexColor" },
     UnionOperation = { "UsePartColor" },
+    SurfaceAppearance = { "ColorMap", "NormalMap", "MetalnessMap", "RoughnessMap", "AlphaMode", "Color" },
     Weld = { "Part0", "Part1", "C0", "C1" },
+    ManualWeld = { "Part0", "Part1", "C0", "C1" },
+    Motor = { "Part0", "Part1", "C0", "C1", "CurrentAngle", "DesiredAngle", "MaxVelocity" },
     Motor6D = { "Part0", "Part1", "C0", "C1", "Transform" },
     WeldConstraint = { "Part0", "Part1", "Enabled" },
+    NoCollisionConstraint = { "Part0", "Part1", "Enabled" },
     Snap = { "Part0", "Part1", "C0", "C1" },
     Attachment = { "CFrame", "Position", "Orientation", "Axis", "SecondaryAxis", "Visible" },
     Script = { "Source", "Enabled", "RunContext" },
@@ -4506,8 +4411,18 @@ local byClass = {
     UIAspectRatioConstraint = { "AspectRatio", "AspectType", "DominantAxis" },
     HingeConstraint = { "ActuatorType", "AngularResponsiveness", "AngularSpeed", "Attachment0", "Attachment1", "Enabled", "LimitsEnabled", "LowerAngle", "MotorMaxAcceleration", "MotorMaxTorque", "Radius", "Restitution", "ServoMaxTorque", "TargetAngle", "UpperAngle" },
     BallSocketConstraint = { "Attachment0", "Attachment1", "Enabled", "LimitsEnabled", "MaxFrictionTorque", "Radius", "Restitution", "TwistLimitsEnabled", "TwistLowerAngle", "TwistUpperAngle", "UpperAngle" },
+    RigidConstraint = { "Attachment0", "Attachment1", "Enabled", "Visible" },
+    RodConstraint = { "Attachment0", "Attachment1", "Enabled", "Length", "LimitAngle0", "LimitAngle1", "LimitsEnabled", "Thickness", "Visible" },
+    PrismaticConstraint = { "ActuatorType", "Attachment0", "Attachment1", "Enabled", "LimitsEnabled", "LowerLimit", "MotorMaxAcceleration", "MotorMaxForce", "Restitution", "ServoMaxForce", "Size", "Speed", "TargetPosition", "UpperLimit", "Velocity" },
+    CylindricalConstraint = { "ActuatorType", "AngularActuatorType", "AngularLimitsEnabled", "AngularResponsiveness", "AngularSpeed", "Attachment0", "Attachment1", "Enabled", "LimitsEnabled", "LowerAngle", "LowerLimit", "MotorMaxAcceleration", "MotorMaxForce", "Restitution", "ServoMaxForce", "Speed", "TargetAngle", "TargetPosition", "UpperAngle", "UpperLimit" },
+    UniversalConstraint = { "Attachment0", "Attachment1", "Enabled", "LimitsEnabled", "MaxAngle", "Restitution", "Radius" },
     AlignPosition = { "ApplyAtCenterOfMass", "Attachment0", "Attachment1", "Enabled", "ForceLimitMode", "MaxAxesForce", "MaxForce", "MaxVelocity", "Mode", "Position", "ReactionForceEnabled", "Responsiveness", "RigidityEnabled" },
     AlignOrientation = { "AlignType", "Attachment0", "Attachment1", "CFrame", "Enabled", "MaxAngularVelocity", "MaxTorque", "Mode", "PrimaryAxis", "PrimaryAxisOnly", "ReactionTorqueEnabled", "Responsiveness", "RigidityEnabled", "SecondaryAxis" },
+    LinearVelocity = { "Attachment0", "Attachment1", "Enabled", "ForceLimitMode", "LineDirection", "LineVelocity", "MaxAxesForce", "MaxForce", "MaxPlanarAxesForce", "PlaneVelocity", "RelativeTo", "VectorVelocity", "VelocityConstraintMode" },
+    AngularVelocity = { "AngularVelocity", "Attachment0", "Enabled", "MaxTorque", "ReactionTorqueEnabled", "RelativeTo" },
+    VectorForce = { "ApplyAtCenterOfMass", "Attachment0", "Enabled", "Force", "RelativeTo" },
+    Torque = { "Attachment0", "Enabled", "RelativeTo", "Torque" },
+    LineForce = { "ApplyAtCenterOfMass", "Attachment0", "Attachment1", "Enabled", "InverseSquareLaw", "Magnitude", "MaxForce", "ReactionForceEnabled" },
     RopeConstraint = { "Attachment0", "Attachment1", "Enabled", "Length", "Restitution", "Thickness", "Visible" },
     SpringConstraint = { "Attachment0", "Attachment1", "Coils", "Damping", "Enabled", "FreeLength", "LimitsEnabled", "MaxForce", "MaxLength", "MinLength", "Radius", "Stiffness", "Thickness", "Visible" }
 }
@@ -4726,7 +4641,27 @@ local function readTags(instance)
     return ok and tags or {}
 end
 
-local function readProperties(instance, refs, warnings)
+local BLOCKING_EXTERNAL_REF_PROPERTIES = {
+    Part0 = true,
+    Part1 = true,
+    Attachment0 = true,
+    Attachment1 = true
+}
+
+local function trackExternalReference(instance, prop, value, externalReferences)
+    if type(externalReferences) ~= "table" or typeof(value) ~= "Instance" then
+        return
+    end
+    table.insert(externalReferences, {
+        path = fullName(instance),
+        className = instance.ClassName,
+        property = prop,
+        targetPath = fullName(value),
+        blocking = BLOCKING_EXTERNAL_REF_PROPERTIES[prop] == true
+    })
+end
+
+local function readProperties(instance, refs, warnings, externalReferences)
     local properties = {}
     for _, prop in ipairs(Allowlist.forInstance(instance)) do
         local ok, value = pcall(function()
@@ -4738,6 +4673,9 @@ local function readProperties(instance, refs, warnings)
                 properties[prop] = encoded
             elseif warning and value ~= nil then
                 table.insert(warnings, fullName(instance) .. "." .. prop .. ": " .. warning)
+                if string.find(warning, "external instance reference", 1, true) then
+                    trackExternalReference(instance, prop, value, externalReferences)
+                end
             end
         end
     end
@@ -4773,6 +4711,7 @@ function Serializer.serialize(root)
     local refs = {}
     local ordered = {}
     local warnings = {}
+    local externalReferences = {}
     local nextId = 0
 
     local function assign(instance)
@@ -4803,7 +4742,7 @@ function Serializer.serialize(root)
         instances[id] = {
             className = instance.ClassName,
             parent = parentId,
-            properties = readProperties(instance, refs, warnings),
+            properties = readProperties(instance, refs, warnings, externalReferences),
             attributes = readAttributes(instance),
             tags = readTags(instance),
             children = children
@@ -4814,7 +4753,8 @@ function Serializer.serialize(root)
         version = 1,
         root = refs[root],
         instances = instances,
-        warnings = warnings
+        warnings = warnings,
+        externalReferences = externalReferences
     }
 end
 

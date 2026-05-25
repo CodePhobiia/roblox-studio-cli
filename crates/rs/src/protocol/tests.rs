@@ -54,6 +54,50 @@ fn autopilot_review_request_roundtrips() {
 }
 
 #[test]
+fn transfer_request_roundtrips_safety_flags() {
+    let req = TransferRequest {
+        from_studio: "Place1".into(),
+        from_path: "ServerStorage.LuckyBlocks".into(),
+        to_studio: "Snipe a Slime!".into(),
+        to_parent_path: "ServerStorage".into(),
+        conflict_mode: Some("replace".into()),
+        dry_run: false,
+        rollback_on_error: true,
+        allow_external_refs: true,
+    };
+
+    let value = serde_json::to_value(&req).unwrap();
+    assert_eq!(value["allowExternalRefs"], true);
+    let back: TransferRequest = serde_json::from_value(value).unwrap();
+    assert!(back.allow_external_refs);
+}
+
+#[test]
+fn deserialize_request_roundtrips_validation_guards() {
+    let req = DeserializeRequest {
+        studio: Some("Target".into()),
+        parent_path: "ServerStorage".into(),
+        blob: serde_json::json!({"version": 1, "root": "i0", "instances": {}}),
+        conflict_mode: None,
+        dry_run: false,
+        rollback_on_error: true,
+        package_id: None,
+        validate_rules: vec!["refs".into(), "welds".into(), "tool".into()],
+        fail_on_validation_failure: true,
+        fail_on_external_refs: true,
+    };
+
+    let value = serde_json::to_value(&req).unwrap();
+    assert_eq!(value["validateRules"][0], "refs");
+    assert_eq!(value["failOnValidationFailure"], true);
+    assert_eq!(value["failOnExternalRefs"], true);
+    let back: DeserializeRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(back.validate_rules.len(), 3);
+    assert!(back.fail_on_validation_failure);
+    assert!(back.fail_on_external_refs);
+}
+
+#[test]
 fn exec_request_requires_explicit_dangerous_approval() {
     let legacy: ExecRequest =
         serde_json::from_str(r#"{"studio":"Demo","lua":"return 1"}"#).unwrap();

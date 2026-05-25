@@ -9,6 +9,7 @@ pub fn run(
     dry_run: bool,
     replace: bool,
     rollback_on_error: bool,
+    allow_external_refs: bool,
     image_rehost: Option<crate::cli::rehost_images::ImageRehostOptions>,
 ) -> AppResult<()> {
     let (from_studio, from_path) = parse_studio_path(&from)?;
@@ -44,6 +45,9 @@ pub fn run(
                 dry_run,
                 rollback_on_error,
                 package_id: None,
+                validate_rules: transfer_validation_rules(),
+                fail_on_validation_failure: true,
+                fail_on_external_refs: !allow_external_refs,
             },
             210,
         )?;
@@ -71,6 +75,7 @@ pub fn run(
             conflict_mode: replace.then_some("replace".to_string()),
             dry_run,
             rollback_on_error,
+            allow_external_refs,
         },
         180,
     )?;
@@ -79,6 +84,13 @@ pub fn run(
     print_warnings(&data);
     std::io::stdout().flush()?;
     Ok(())
+}
+
+fn transfer_validation_rules() -> Vec<String> {
+    ["refs", "welds", "tool"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 fn print_transfer_result(dry_run: bool, data: &serde_json::Value) {

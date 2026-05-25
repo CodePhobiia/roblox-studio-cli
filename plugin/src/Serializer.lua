@@ -25,7 +25,27 @@ local function readTags(instance)
     return ok and tags or {}
 end
 
-local function readProperties(instance, refs, warnings)
+local BLOCKING_EXTERNAL_REF_PROPERTIES = {
+    Part0 = true,
+    Part1 = true,
+    Attachment0 = true,
+    Attachment1 = true
+}
+
+local function trackExternalReference(instance, prop, value, externalReferences)
+    if type(externalReferences) ~= "table" or typeof(value) ~= "Instance" then
+        return
+    end
+    table.insert(externalReferences, {
+        path = fullName(instance),
+        className = instance.ClassName,
+        property = prop,
+        targetPath = fullName(value),
+        blocking = BLOCKING_EXTERNAL_REF_PROPERTIES[prop] == true
+    })
+end
+
+local function readProperties(instance, refs, warnings, externalReferences)
     local properties = {}
     for _, prop in ipairs(Allowlist.forInstance(instance)) do
         local ok, value = pcall(function()
@@ -37,6 +57,9 @@ local function readProperties(instance, refs, warnings)
                 properties[prop] = encoded
             elseif warning and value ~= nil then
                 table.insert(warnings, fullName(instance) .. "." .. prop .. ": " .. warning)
+                if string.find(warning, "external instance reference", 1, true) then
+                    trackExternalReference(instance, prop, value, externalReferences)
+                end
             end
         end
     end
@@ -72,6 +95,7 @@ function Serializer.serialize(root)
     local refs = {}
     local ordered = {}
     local warnings = {}
+    local externalReferences = {}
     local nextId = 0
 
     local function assign(instance)
@@ -102,7 +126,7 @@ function Serializer.serialize(root)
         instances[id] = {
             className = instance.ClassName,
             parent = parentId,
-            properties = readProperties(instance, refs, warnings),
+            properties = readProperties(instance, refs, warnings, externalReferences),
             attributes = readAttributes(instance),
             tags = readTags(instance),
             children = children
@@ -113,7 +137,8 @@ function Serializer.serialize(root)
         version = 1,
         root = refs[root],
         instances = instances,
-        warnings = warnings
+        warnings = warnings,
+        externalReferences = externalReferences
     }
 end
 

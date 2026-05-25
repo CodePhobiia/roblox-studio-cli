@@ -22610,6 +22610,9 @@ fn run_plan_operations(options: RunPlanOptions<'_>) -> AppResult<OperationRunSum
                             .and_then(|value| value.get("packageId"))
                             .and_then(Value::as_str)
                             .map(str::to_string),
+                        validate_rules: Vec::new(),
+                        fail_on_validation_failure: false,
+                        fail_on_external_refs: false,
                     },
                     210,
                 )?;
@@ -23047,6 +23050,9 @@ fn restore_rollback_artifact_inner(
                 .and_then(|value| value.get("packageId"))
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            validate_rules: Vec::new(),
+            fail_on_validation_failure: false,
+            fail_on_external_refs: false,
         },
         210,
     )?;

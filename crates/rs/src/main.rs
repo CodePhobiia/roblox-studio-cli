@@ -104,6 +104,10 @@ enum Command {
         #[arg(long)]
         rollback_on_error: bool,
 
+        /// Allow transferred welds/constraints to omit refs that point outside the selected source root.
+        #[arg(long)]
+        allow_external_refs: bool,
+
         #[command(flatten)]
         image_rehost: ImageRehostArgs,
     },
@@ -7266,6 +7270,7 @@ fn run() -> AppResult<()> {
             dry_run,
             replace,
             rollback_on_error,
+            allow_external_refs,
             image_rehost,
         } => cli::transfer::run(
             args.port,
@@ -7274,6 +7279,7 @@ fn run() -> AppResult<()> {
             dry_run,
             replace,
             rollback_on_error,
+            allow_external_refs,
             image_rehost_options(image_rehost, dry_run, false),
         ),
         Command::Export {

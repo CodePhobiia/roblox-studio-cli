@@ -258,6 +258,9 @@ fn smoke_weld_round_trip(port: u16, studio: Option<String>) -> AppResult<()> {
             dry_run: false,
             rollback_on_error: true,
             package_id: Some("rs-smoke".into()),
+            validate_rules: Vec::new(),
+            fail_on_validation_failure: false,
+            fail_on_external_refs: false,
         },
         120,
     )?;
@@ -298,6 +301,9 @@ fn smoke_package_conflict(port: u16, studio: Option<String>) -> AppResult<()> {
             dry_run: true,
             rollback_on_error: false,
             package_id: Some("rs-smoke".into()),
+            validate_rules: Vec::new(),
+            fail_on_validation_failure: false,
+            fail_on_external_refs: false,
         },
         75,
     )?;

@@ -188,6 +188,9 @@ pub fn import_run(
             package_id: manifest
                 .as_ref()
                 .map(|manifest| manifest.package_id.clone()),
+            validate_rules: Vec::new(),
+            fail_on_validation_failure: false,
+            fail_on_external_refs: false,
         },
         210,
     )?;
@@ -324,6 +327,9 @@ pub fn verify_run(
                 dry_run: true,
                 rollback_on_error: false,
                 package_id: Some(manifest.package_id.clone()),
+                validate_rules: Vec::new(),
+                fail_on_validation_failure: false,
+                fail_on_external_refs: false,
             },
             120,
         )?)
