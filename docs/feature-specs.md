@@ -4,6 +4,8 @@ This document captures proposed next features for `rs`, the Roblox Studio CLI pl
 
 Implementation status: initial v1 command, bridge, and plugin support has been added for every feature below. A second implementation pass added the next reliability layer: `doctor`, plugin/CLI protocol versioning, `validate --fix`, live smoke commands, better asset import fidelity, Open Cloud upload, and package import conflict modes. A third pass added `install-plugin`, upload waiting/import composition, Open Cloud profiles, package verification and archives, diff fix plans, transactional transfer controls, smoke regression reports, asset fidelity v2, and ownership metadata. Some items deliberately start with conservative behavior where Roblox platform limits make a fully automatic path unsafe, especially local audio import, raw mesh cloud upload, credential storage, and destructive sync/package semantics.
 
+Before adding new command families, use [Current Feature Expansion Plan](current-feature-expansion-plan.md) to deepen the existing features across object coverage, property coverage, references, asset ownership, safety controls, idempotency, and proof artifacts.
+
 ## Latest Implemented Features
 
 | Feature | Status |
