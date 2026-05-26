@@ -4332,6 +4332,8 @@ local imageObject = {
     "ScaleType", "SliceCenter", "TileSize"
 }
 
+local attachment = { "CFrame", "Position", "Orientation", "Axis", "SecondaryAxis", "Visible" }
+
 local byClass = {
     Folder = {},
     Configuration = {},
@@ -4348,7 +4350,6 @@ local byClass = {
     WeldConstraint = { "Part0", "Part1", "Enabled" },
     NoCollisionConstraint = { "Part0", "Part1", "Enabled" },
     Snap = { "Part0", "Part1", "C0", "C1" },
-    Attachment = { "CFrame", "Position", "Orientation", "Axis", "SecondaryAxis", "Visible" },
     Script = { "Source", "Enabled", "RunContext" },
     LocalScript = { "Source", "Enabled" },
     ModuleScript = { "Source" },
@@ -4448,6 +4449,9 @@ function Allowlist.forInstance(instance)
     end
     if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
         append(props, imageObject)
+    end
+    if instance:IsA("Attachment") then
+        append(props, attachment)
     end
 
     append(props, byClass[instance.ClassName] or {})

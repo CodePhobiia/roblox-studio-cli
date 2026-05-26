@@ -1,6 +1,8 @@
 mod bridge;
 mod cli;
 mod error;
+#[cfg(test)]
+mod plugin_static_tests;
 mod protocol;
 
 use crate::error::{AppError, AppResult};
