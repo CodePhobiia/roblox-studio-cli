@@ -13,6 +13,8 @@ pub(crate) struct InstallReport {
     pub(crate) installed_hash: String,
     pub(crate) installed_modified_unix: u64,
     pub(crate) copied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) studio_query_warning: Option<String>,
     pub(crate) restart_studios: Vec<StudioRestart>,
 }
 
@@ -65,7 +67,8 @@ pub(crate) fn install_once(port: u16) -> AppResult<InstallReport> {
     std::fs::copy(&built_plugin, &installed_plugin)?;
     let after_hash = file_hash(&installed_plugin)?;
     let installed_modified = std::fs::metadata(&installed_plugin)?.modified()?;
-    let restart_studios = restart_studios(port, before_hash.as_deref() != Some(&after_hash));
+    let (restart_studios, studio_query_warning) =
+        restart_studios(port, before_hash.as_deref() != Some(&after_hash));
 
     Ok(InstallReport {
         built_plugin: built_plugin.display().to_string(),
@@ -73,6 +76,7 @@ pub(crate) fn install_once(port: u16) -> AppResult<InstallReport> {
         installed_hash: after_hash,
         installed_modified_unix: unix_seconds(installed_modified),
         copied: true,
+        studio_query_warning,
         restart_studios,
     })
 }
@@ -97,11 +101,19 @@ fn build_plugin(plugin_dir: &Path, out: &Path) -> AppResult<()> {
     Ok(())
 }
 
-fn restart_studios(port: u16, copied_new_bundle: bool) -> Vec<StudioRestart> {
-    let Ok(studios) = fetch_studios(port) else {
-        return Vec::new();
+fn restart_studios(port: u16, copied_new_bundle: bool) -> (Vec<StudioRestart>, Option<String>) {
+    let studios = match fetch_studios(port) {
+        Ok(studios) => studios,
+        Err(err) => {
+            return (
+                Vec::new(),
+                Some(format!(
+                    "could not query bridge sessions: {err}. No Studio window was interrupted, but any already-open Studio window may need a manual restart to load the installed plugin"
+                )),
+            )
+        }
     };
-    studios
+    let restarts = studios
         .into_iter()
         .filter_map(|studio| {
             let reason = if copied_new_bundle {
@@ -126,7 +138,8 @@ fn restart_studios(port: u16, copied_new_bundle: bool) -> Vec<StudioRestart> {
                 reason,
             })
         })
-        .collect()
+        .collect();
+    (restarts, None)
 }
 
 fn fetch_studios(port: u16) -> AppResult<Vec<StudioInfo>> {
@@ -157,7 +170,9 @@ fn print_report(report: &InstallReport) {
     println!("Built plugin: {}", report.built_plugin);
     println!("Installed plugin: {}", report.installed_plugin);
     println!("Installed hash: {}", report.installed_hash);
-    if report.restart_studios.is_empty() {
+    if let Some(warning) = &report.studio_query_warning {
+        println!("Studio session query: {warning}");
+    } else if report.restart_studios.is_empty() {
         println!("No connected Studio restart required was detected.");
     } else {
         println!("Restart these Studio windows to load the installed plugin:");

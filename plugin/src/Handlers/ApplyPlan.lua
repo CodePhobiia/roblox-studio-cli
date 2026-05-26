@@ -132,6 +132,29 @@ local function decodeValue(value)
     return decoded, warning
 end
 
+local function canMutateWithSource(instance, options)
+    if options.force == true then
+        return true, nil
+    end
+    if type(options.sourceId) == "string" and options.sourceId ~= "" then
+        local existingSourceId = nil
+        pcall(function()
+            existingSourceId = instance:GetAttribute("rsSourceId")
+        end)
+        if existingSourceId ~= options.sourceId then
+            local path = "<unknown>"
+            pcall(function()
+                path = instance:GetFullName()
+            end)
+            return false, "refusing to mutate instance from a different source: " .. path .. " (pass --force to override)"
+        end
+    end
+    return Ownership.canMutate(instance, {
+        force = options.force,
+        sourceId = options.sourceId
+    })
+end
+
 local function setTags(instance, encoded)
     local desired = {}
     if type(encoded) == "table" then
@@ -169,7 +192,7 @@ local function applySet(root, rootPath, change, options, result)
         result.skipped += 1
         return
     end
-    local canMutate, mutateErr = Ownership.canMutate(instance, { force = options.force })
+    local canMutate, mutateErr = canMutateWithSource(instance, options)
     if not canMutate then
         result.refused += 1
         table.insert(result.warnings, mutateErr)
@@ -244,7 +267,7 @@ local function applyDelete(root, change, options, result)
         result.skipped += 1
         return
     end
-    local canMutate, mutateErr = Ownership.canMutate(instance, { force = options.force })
+    local canMutate, mutateErr = canMutateWithSource(instance, options)
     if not canMutate then
         result.refused += 1
         table.insert(result.warnings, mutateErr)
@@ -258,6 +281,99 @@ local function applyDelete(root, change, options, result)
     table.insert(result.changedPaths, instance:GetFullName())
     instance:Destroy()
     result.applied += 1
+end
+
+local function operationAction(operation, change)
+    return tostring(operation.action or change.action or change.kind or "unknown")
+end
+
+local function operationToChange(operation)
+    if type(operation) ~= "table" then
+        return nil
+    end
+    if type(operation.kind) == "string" then
+        return operation
+    end
+
+    local action = tostring(operation.action or "")
+    local change = {
+        path = operation.path,
+        property = operation.property,
+        before = operation.before,
+        after = operation.after,
+        action = action
+    }
+    if action == "create" then
+        change.kind = "added"
+        if change.after == nil then
+            change.after = operation.className or "Folder"
+        end
+    elseif action == "delete" then
+        change.kind = "deleted"
+    elseif action == "set-property" or action == "setProperty" then
+        change.kind = operation.kind or "modified"
+    else
+        change.kind = action
+    end
+    return change
+end
+
+local function planOperations(plan)
+    local operations = {}
+    if type(plan.operations) == "table" and #plan.operations > 0 then
+        for _, operation in ipairs(plan.operations) do
+            local change = operationToChange(operation)
+            if change then
+                table.insert(operations, {
+                    operation = operation,
+                    change = change
+                })
+            end
+        end
+        return operations
+    end
+
+    if type(plan.changes) == "table" then
+        for _, change in ipairs(plan.changes) do
+            table.insert(operations, {
+                operation = change,
+                change = change
+            })
+        end
+    end
+    return operations
+end
+
+local function resultPath(change, result, changedStart)
+    if #result.changedPaths > changedStart then
+        return result.changedPaths[#result.changedPaths]
+    end
+    return tostring(change.path or "")
+end
+
+local function recordOperationResult(result, index, operation, change, before)
+    local status = "skipped"
+    local message = nil
+    if result.refused > before.refused then
+        status = "refused"
+        message = result.warnings[#result.warnings]
+        table.insert(result.refusedPaths, resultPath(change, result, before.changedPaths))
+    elseif result.applied > before.applied then
+        status = result.dryRun and "planned" or "applied"
+    elseif result.skipped > before.skipped then
+        status = "skipped"
+        if #result.warnings > before.warnings then
+            message = result.warnings[#result.warnings]
+        end
+    end
+    table.insert(result.operationResults, {
+        index = index,
+        action = operationAction(operation, change),
+        path = tostring(change.path or ""),
+        property = change.property,
+        status = status,
+        message = message
+    })
 end
 
 local function applyPlanHandler(payload)
@@ -277,7 +393,7 @@ local function applyPlanHandler(payload)
     if not root then
         return { ok = false, error = err }
     end
-    local changes = type(payload.plan.changes) == "table" and payload.plan.changes or {}
+    local operations = planOperations(payload.plan)
     local result = {
         rootPath = root:GetFullName(),
         dryRun = payload.dryRun == true,
@@ -285,20 +401,34 @@ local function applyPlanHandler(payload)
         skipped = 0,
         refused = 0,
         changedPaths = {},
-        warnings = {}
+        refusedPaths = {},
+        operationResults = {},
+        warnings = {},
+        snapshotRecorded = false,
+        rolledBack = false
     }
     if not result.dryRun then
         result.snapshotBefore = Serializer.serialize(root)
         result.restoreParentPath = parentPathOf(payload.rootPath)
+        result.snapshotRecorded = true
     end
     local options = {
         dryRun = result.dryRun,
         force = payload.force == true,
         onlySet = toSet(payload.only),
         excludeSet = toSet(payload.exclude),
+        sourceId = type(payload.plan.sourceId) == "string" and payload.plan.sourceId or nil,
         sourcePrefix = "apply-plan:" .. root:GetFullName()
     }
-    for _, change in ipairs(changes) do
+    for index, item in ipairs(operations) do
+        local change = item.change
+        local before = {
+            applied = result.applied,
+            skipped = result.skipped,
+            refused = result.refused,
+            warnings = #result.warnings,
+            changedPaths = #result.changedPaths
+        }
         if not changeAllowed(change, options.onlySet) then
             result.skipped += 1
         elseif change.kind == "added" then
@@ -311,6 +441,7 @@ local function applyPlanHandler(payload)
             result.skipped += 1
             table.insert(result.warnings, "unknown change kind: " .. tostring(change.kind))
         end
+        recordOperationResult(result, index, item.operation, change, before)
     end
     if not result.dryRun and result.refused > 0 and result.snapshotBefore then
         local restored, restoreWarningsOrErr = restoreSnapshot(result.snapshotBefore, result.restoreParentPath)

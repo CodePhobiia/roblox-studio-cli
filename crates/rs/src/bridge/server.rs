@@ -24,7 +24,7 @@ use tracing_subscriber::EnvFilter;
 struct AppState {
     registry: Registry,
     shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    auth_token: Arc<String>,
+    auth_token: Arc<crate::bridge::auth::TokenInfo>,
 }
 
 pub async fn serve(port: u16) -> AppResult<()> {
@@ -33,7 +33,7 @@ pub async fn serve(port: u16) -> AppResult<()> {
         .try_init();
 
     let registry = Registry::new();
-    let auth_token = crate::bridge::auth::load_or_create_token()?;
+    let auth_token = crate::bridge::auth::load_or_create_token_info()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let state = AppState {
         registry,
@@ -97,7 +97,10 @@ async fn require_bridge_auth(
     request: Request,
     next: Next,
 ) -> Response {
-    let authorized = bridge_auth_matches(request.headers(), state.auth_token.as_str());
+    let has_header = request
+        .headers()
+        .contains_key(crate::bridge::auth::TOKEN_HEADER);
+    let authorized = bridge_auth_matches(request.headers(), state.auth_token.token.as_str());
 
     if authorized {
         return next.run(request).await;
@@ -106,7 +109,7 @@ async fn require_bridge_auth(
     (
         StatusCode::UNAUTHORIZED,
         Json(Envelope::<serde_json::Value>::err(
-            "bridge request missing or invalid auth token; use the rs CLI or set RS_BRIDGE_TOKEN for trusted local tooling",
+            crate::bridge::auth::unauthorized_message(has_header, &state.auth_token.source),
             "unauthorized",
         )),
     )
@@ -587,18 +590,12 @@ async fn deserialize(
     State(state): State<AppState>,
     Json(req): Json<DeserializeRequest>,
 ) -> Json<Envelope<serde_json::Value>> {
+    let studio = req.studio.clone();
     match run_plugin_command(
         &state.registry,
-        req.studio.as_deref(),
+        studio.as_deref(),
         "deserialize",
-        serde_json::json!({
-            "parentPath": req.parent_path,
-            "blob": req.blob,
-            "conflictMode": req.conflict_mode,
-            "dryRun": req.dry_run,
-            "rollbackOnError": req.rollback_on_error,
-            "packageId": req.package_id
-        }),
+        deserialize_command_payload(req),
         180,
     )
     .await
@@ -657,6 +654,7 @@ async fn run_plugin_command(
     registry
         .ensure_protocol(&token, PLUGIN_PROTOCOL_VERSION)
         .await?;
+    registry.ensure_capability(&token, kind).await?;
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "_rs".into(),
@@ -666,13 +664,18 @@ async fn run_plugin_command(
             }),
         );
     }
-    let rx = registry.enqueue(&token, kind, payload).await?;
-    let result = tokio::time::timeout(Duration::from_secs(timeout_secs), rx)
-        .await
-        .map_err(|_| AppError::CommandTimeout {
-            timeout_ms: timeout_secs * 1000,
-        })?
-        .map_err(|_| AppError::Other("plugin dropped the result channel".into()))?;
+    let queued = registry.enqueue_command(&token, kind, payload).await?;
+    let result = match tokio::time::timeout(Duration::from_secs(timeout_secs), queued.result).await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            registry.cancel_pending_command(&queued.command_id).await;
+            return Err(AppError::CommandTimeout {
+                timeout_ms: timeout_secs * 1000,
+            });
+        }
+    }
+    .map_err(|_| AppError::Other("plugin dropped the result channel".into()))?;
 
     if !result.ok {
         return Err(AppError::PluginError(
@@ -682,10 +685,25 @@ async fn run_plugin_command(
     Ok(result.data.unwrap_or_else(|| serde_json::json!(null)))
 }
 
+fn deserialize_command_payload(req: DeserializeRequest) -> serde_json::Value {
+    serde_json::json!({
+        "parentPath": req.parent_path,
+        "blob": req.blob,
+        "conflictMode": req.conflict_mode,
+        "dryRun": req.dry_run,
+        "rollbackOnError": req.rollback_on_error,
+        "packageId": req.package_id,
+        "validateRules": req.validate_rules,
+        "failOnValidationFailure": req.fail_on_validation_failure,
+        "failOnExternalRefs": req.fail_on_external_refs
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::bridge_auth_matches;
+    use super::{bridge_auth_matches, deserialize_command_payload};
     use crate::bridge::auth::TOKEN_HEADER;
+    use crate::protocol::messages::DeserializeRequest;
     use axum::http::{HeaderMap, HeaderValue};
 
     #[test]
@@ -698,5 +716,30 @@ mod tests {
 
         headers.insert(TOKEN_HEADER, HeaderValue::from_static("secret"));
         assert!(bridge_auth_matches(&headers, "secret"));
+    }
+
+    #[test]
+    fn deserialize_command_payload_forwards_guard_and_package_fields() {
+        let payload = deserialize_command_payload(DeserializeRequest {
+            studio: Some("Target".into()),
+            parent_path: "Workspace".into(),
+            blob: serde_json::json!({"version": 1}),
+            conflict_mode: Some("replace".into()),
+            dry_run: true,
+            rollback_on_error: true,
+            package_id: Some("pkg-1".into()),
+            validate_rules: vec!["refs".into(), "welds".into(), "tool".into()],
+            fail_on_validation_failure: true,
+            fail_on_external_refs: true,
+        });
+
+        assert_eq!(payload["parentPath"], "Workspace");
+        assert_eq!(payload["conflictMode"], "replace");
+        assert_eq!(payload["dryRun"], true);
+        assert_eq!(payload["rollbackOnError"], true);
+        assert_eq!(payload["packageId"], "pkg-1");
+        assert_eq!(payload["validateRules"][0], "refs");
+        assert_eq!(payload["failOnValidationFailure"], true);
+        assert_eq!(payload["failOnExternalRefs"], true);
     }
 }

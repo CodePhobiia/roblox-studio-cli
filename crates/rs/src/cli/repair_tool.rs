@@ -54,6 +54,18 @@ pub fn run(
             "Physics properties changed: {}",
             response.physics_properties_changed
         );
+        if !response.fix_ids.is_empty() {
+            println!("Fix IDs: {}", response.fix_ids.join(","));
+        }
+        if !response.changed_paths.is_empty() {
+            println!("Changed paths:");
+            for path in response.changed_paths.iter().take(20) {
+                println!("  - {path}");
+            }
+            if response.changed_paths.len() > 20 {
+                println!("  ... ({} more)", response.changed_paths.len() - 20);
+            }
+        }
         if !response.warnings.is_empty() {
             println!("Warnings ({}):", response.warnings.len());
             for warning in &response.warnings {

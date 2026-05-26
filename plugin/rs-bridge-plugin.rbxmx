@@ -107,6 +107,7 @@ function AuditLog.record(command, result)
         pathsChanged = collectPaths(data),
         warnings = type(data.warnings) == "table" and data.warnings or {},
         error = result.ok and nil or tostring(result.error or "unknown error"),
+        undoable = type(data.snapshotBefore) == "table" and type(data.restoreParentPath) == "string",
         snapshotBefore = data.snapshotBefore,
         restoreParentPath = data.restoreParentPath
     }
@@ -321,6 +322,16 @@ local function render()
         table.insert(lines, "")
         table.insert(lines, "Prompt")
         table.insert(lines, valueOrDash(latestRun.prompt))
+        if latestRun.planHash or latestRun.previewIntegrityStatus or latestRun.alphaPacketStatus or latestRun.applyCommand then
+            table.insert(lines, "")
+            table.insert(lines, "Gate proof")
+            table.insert(lines, "  Plan hash: " .. valueOrDash(latestRun.planHash))
+            table.insert(lines, "  Preview integrity: " .. valueOrDash(latestRun.previewIntegrityStatus))
+            table.insert(lines, "  Alpha packet: " .. valueOrDash(latestRun.alphaPacketStatus))
+            if latestRun.applyCommand then
+                table.insert(lines, "  Apply: " .. tostring(latestRun.applyCommand))
+            end
+        end
         appendCounts(lines, latestRun.operationCounts)
         if latestRun.companionStatus or latestRun.reviewPackStatus or latestRun.arcStatus or latestRun.bestFriendStatus or latestRun.bestFriendPilotStatus or latestRun.bestFriendRunnerStatus then
             table.insert(lines, "")
@@ -837,6 +848,162 @@ return Deserializer
     </Item>
     <Item class="ModuleScript" referent="5">
       <Properties>
+        <string name="Name">Diagnostics</string>
+        <string name="Source"><![CDATA[local Diagnostics = {}
+
+Diagnostics.Fixes = {
+    TOOL_REMOVE_BROKEN_JOINTS = "fix.tool.remove-broken-joints",
+    TOOL_SET_PART_PHYSICS = "fix.tool.set-part-physics",
+    TOOL_UNANCHOR_PARTS = "fix.tool.unanchor-parts",
+    TOOL_WELD_DISCONNECTED_PARTS = "fix.tool.weld-disconnected-parts"
+}
+
+Diagnostics.Rules = {
+    ["asset.animation.missing"] = {
+        description = "Animation has an empty AnimationId"
+    },
+    ["asset.editable.large-risk"] = {
+        description = "Editable asset may be too large or local-only for publish"
+    },
+    ["asset.image.missing"] = {
+        description = "Image-like asset reference is empty"
+    },
+    ["asset.mesh.missing"] = {
+        description = "Mesh asset reference is empty"
+    },
+    ["asset.private-risk"] = {
+        description = "Asset may be private, moderated, or inaccessible to another creator"
+    },
+    ["asset.sound.missing"] = {
+        description = "Sound has an empty SoundId"
+    },
+    ["ownership.unowned"] = {
+        description = "Instance is not marked as rs-owned"
+    },
+    ["path.duplicate-name"] = {
+        description = "Siblings share the same name"
+    },
+    ["ref.external"] = {
+        description = "Reference points outside the validated subtree"
+    },
+    ["ref.missing"] = {
+        description = "Object reference property is nil"
+    },
+    ["tool.handle.ambiguous"] = {
+        description = "Tool has multiple direct Handle children"
+    },
+    ["tool.handle.missing"] = {
+        description = "Tool requires a BasePart child named Handle"
+    },
+    ["tool.handle.optional"] = {
+        description = "Tool has RequiresHandle=false and no Handle"
+    },
+    ["tool.joint.broken"] = {
+        description = "Tool rigid joint has missing or invalid endpoints",
+        fixId = Diagnostics.Fixes.TOOL_REMOVE_BROKEN_JOINTS
+    },
+    ["tool.part.anchored"] = {
+        description = "Tool BasePart is anchored",
+        fixId = Diagnostics.Fixes.TOOL_UNANCHOR_PARTS
+    },
+    ["tool.part.collision"] = {
+        description = "Tool non-handle BasePart collides by default",
+        fixId = Diagnostics.Fixes.TOOL_SET_PART_PHYSICS
+    },
+    ["tool.part.disconnected"] = {
+        description = "Tool BasePart is not rigidly connected to Handle",
+        fixId = Diagnostics.Fixes.TOOL_WELD_DISCONNECTED_PARTS
+    },
+    ["tool.parts"] = {
+        description = "Tool BasePart count summary"
+    }
+}
+
+Diagnostics.AssetMissingRules = {
+    animation = "asset.animation.missing",
+    audio = "asset.sound.missing",
+    image = "asset.image.missing",
+    mesh = "asset.mesh.missing"
+}
+
+Diagnostics.AssetProperties = {
+    Animation = {
+        AnimationId = { kind = "animation", reportWhenMissing = true }
+    },
+    Beam = {
+        Texture = { kind = "image", validateWhenMissing = true }
+    },
+    Decal = {
+        Texture = { kind = "image", reportWhenMissing = true }
+    },
+    ImageButton = {
+        Image = { kind = "image", fallbackProperties = { "ImageContent" }, reportWhenMissing = true }
+    },
+    ImageLabel = {
+        Image = { kind = "image", fallbackProperties = { "ImageContent" }, reportWhenMissing = true }
+    },
+    MeshPart = {
+        MeshId = { kind = "mesh", reportWhenMissing = true },
+        TextureID = { kind = "image", validateWhenMissing = false },
+        TextureId = { kind = "image", optionalProperty = true, validateWhenMissing = false }
+    },
+    ParticleEmitter = {
+        Texture = { kind = "image", validateWhenMissing = true }
+    },
+    ScrollingFrame = {
+        BottomImage = { kind = "image", validateWhenMissing = false },
+        MidImage = { kind = "image", validateWhenMissing = false },
+        TopImage = { kind = "image", validateWhenMissing = false }
+    },
+    Sound = {
+        SoundId = { kind = "audio", reportWhenMissing = true }
+    },
+    SpecialMesh = {
+        MeshId = { kind = "mesh", reportWhenMissing = true },
+        TextureId = { kind = "image", validateWhenMissing = false },
+        TextureID = { kind = "image", optionalProperty = true, validateWhenMissing = false }
+    },
+    SurfaceAppearance = {
+        ColorMap = { kind = "image", validateWhenMissing = false },
+        MetalnessMap = { kind = "image", validateWhenMissing = false },
+        NormalMap = { kind = "image", validateWhenMissing = false },
+        RoughnessMap = { kind = "image", validateWhenMissing = false }
+    },
+    Texture = {
+        Texture = { kind = "image", reportWhenMissing = true }
+    },
+    Trail = {
+        Texture = { kind = "image", validateWhenMissing = true }
+    }
+}
+
+function Diagnostics.assetPropertiesFor(instance)
+    return Diagnostics.AssetProperties[instance.ClassName]
+end
+
+function Diagnostics.missingAssetRule(kind)
+    return Diagnostics.AssetMissingRules[kind] or "asset.image.missing"
+end
+
+function Diagnostics.ruleInfo(ruleId)
+    return Diagnostics.Rules[ruleId]
+end
+
+function Diagnostics.fixInfo(fixId)
+    for _, id in pairs(Diagnostics.Fixes) do
+        if id == fixId then
+            return { id = fixId }
+        end
+    end
+    return nil
+end
+
+return Diagnostics
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="6">
+      <Properties>
         <string name="Name">Dispatch</string>
         <string name="Source"><![CDATA[local Dispatch = {}
 local handlers = {}
@@ -884,26 +1051,14 @@ return Dispatch
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="6">
+    <Item class="ModuleScript" referent="7">
       <Properties>
         <string name="Name">Exporter</string>
         <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
+local Allowlist = require(script.Parent.PropertyAllowlist)
 local Serializer = require(script.Parent.Serializer)
 
 local Exporter = {}
-
-local ASSET_PROPERTIES = {
-    AnimationId = "animation",
-    BottomImage = "image",
-    Image = "image",
-    MidImage = "image",
-    MeshId = "mesh",
-    SoundId = "audio",
-    TopImage = "image",
-    Texture = "image",
-    TextureID = "image",
-    TextureId = "image"
-}
 
 local SCRIPT_EXTENSIONS = {
     Script = ".server.lua",
@@ -958,22 +1113,9 @@ local function addFile(files, path, kind, content, json)
     })
 end
 
-local function assetKindFor(instance, property)
-    if instance:IsA("ParticleEmitter") or instance:IsA("Beam") or instance:IsA("Trail") then
-        if property == "Texture" then
-            return "vfx-texture"
-        end
-    end
-    return ASSET_PROPERTIES[property]
-end
-
 local function addAssetFiles(files, dir, metadata)
     for property, value in pairs(metadata.properties or {}) do
-        local kind = assetKindFor({
-            IsA = function(_, className)
-                return metadata.className == className
-            end
-        }, property)
+        local kind = Allowlist.contentKindForClass(metadata.className, property)
         if kind and type(value) == "string" and value ~= "" then
             addFile(files, joinPath(dir, "assets/" .. sanitize(property) .. ".asset.json"), kind, nil, {
                 instancePath = metadata.fullPath,
@@ -1057,11 +1199,11 @@ return Exporter
 ]]></string>
       </Properties>
     </Item>
-    <Item class="Folder" referent="7">
+    <Item class="Folder" referent="8">
       <Properties>
         <string name="Name">Handlers</string>
       </Properties>
-      <Item class="ModuleScript" referent="8">
+      <Item class="ModuleScript" referent="9">
         <Properties>
           <string name="Name">ApplyPlan</string>
           <string name="Source"><![CDATA[local CollectionService = game:GetService("CollectionService")
@@ -1198,6 +1340,29 @@ local function decodeValue(value)
     return decoded, warning
 end
 
+local function canMutateWithSource(instance, options)
+    if options.force == true then
+        return true, nil
+    end
+    if type(options.sourceId) == "string" and options.sourceId ~= "" then
+        local existingSourceId = nil
+        pcall(function()
+            existingSourceId = instance:GetAttribute("rsSourceId")
+        end)
+        if existingSourceId ~= options.sourceId then
+            local path = "<unknown>"
+            pcall(function()
+                path = instance:GetFullName()
+            end)
+            return false, "refusing to mutate instance from a different source: " .. path .. " (pass --force to override)"
+        end
+    end
+    return Ownership.canMutate(instance, {
+        force = options.force,
+        sourceId = options.sourceId
+    })
+end
+
 local function setTags(instance, encoded)
     local desired = {}
     if type(encoded) == "table" then
@@ -1235,7 +1400,7 @@ local function applySet(root, rootPath, change, options, result)
         result.skipped += 1
         return
     end
-    local canMutate, mutateErr = Ownership.canMutate(instance, { force = options.force })
+    local canMutate, mutateErr = canMutateWithSource(instance, options)
     if not canMutate then
         result.refused += 1
         table.insert(result.warnings, mutateErr)
@@ -1310,7 +1475,7 @@ local function applyDelete(root, change, options, result)
         result.skipped += 1
         return
     end
-    local canMutate, mutateErr = Ownership.canMutate(instance, { force = options.force })
+    local canMutate, mutateErr = canMutateWithSource(instance, options)
     if not canMutate then
         result.refused += 1
         table.insert(result.warnings, mutateErr)
@@ -1324,6 +1489,99 @@ local function applyDelete(root, change, options, result)
     table.insert(result.changedPaths, instance:GetFullName())
     instance:Destroy()
     result.applied += 1
+end
+
+local function operationAction(operation, change)
+    return tostring(operation.action or change.action or change.kind or "unknown")
+end
+
+local function operationToChange(operation)
+    if type(operation) ~= "table" then
+        return nil
+    end
+    if type(operation.kind) == "string" then
+        return operation
+    end
+
+    local action = tostring(operation.action or "")
+    local change = {
+        path = operation.path,
+        property = operation.property,
+        before = operation.before,
+        after = operation.after,
+        action = action
+    }
+    if action == "create" then
+        change.kind = "added"
+        if change.after == nil then
+            change.after = operation.className or "Folder"
+        end
+    elseif action == "delete" then
+        change.kind = "deleted"
+    elseif action == "set-property" or action == "setProperty" then
+        change.kind = operation.kind or "modified"
+    else
+        change.kind = action
+    end
+    return change
+end
+
+local function planOperations(plan)
+    local operations = {}
+    if type(plan.operations) == "table" and #plan.operations > 0 then
+        for _, operation in ipairs(plan.operations) do
+            local change = operationToChange(operation)
+            if change then
+                table.insert(operations, {
+                    operation = operation,
+                    change = change
+                })
+            end
+        end
+        return operations
+    end
+
+    if type(plan.changes) == "table" then
+        for _, change in ipairs(plan.changes) do
+            table.insert(operations, {
+                operation = change,
+                change = change
+            })
+        end
+    end
+    return operations
+end
+
+local function resultPath(change, result, changedStart)
+    if #result.changedPaths > changedStart then
+        return result.changedPaths[#result.changedPaths]
+    end
+    return tostring(change.path or "")
+end
+
+local function recordOperationResult(result, index, operation, change, before)
+    local status = "skipped"
+    local message = nil
+    if result.refused > before.refused then
+        status = "refused"
+        message = result.warnings[#result.warnings]
+        table.insert(result.refusedPaths, resultPath(change, result, before.changedPaths))
+    elseif result.applied > before.applied then
+        status = result.dryRun and "planned" or "applied"
+    elseif result.skipped > before.skipped then
+        status = "skipped"
+        if #result.warnings > before.warnings then
+            message = result.warnings[#result.warnings]
+        end
+    end
+    table.insert(result.operationResults, {
+        index = index,
+        action = operationAction(operation, change),
+        path = tostring(change.path or ""),
+        property = change.property,
+        status = status,
+        message = message
+    })
 end
 
 local function applyPlanHandler(payload)
@@ -1343,7 +1601,7 @@ local function applyPlanHandler(payload)
     if not root then
         return { ok = false, error = err }
     end
-    local changes = type(payload.plan.changes) == "table" and payload.plan.changes or {}
+    local operations = planOperations(payload.plan)
     local result = {
         rootPath = root:GetFullName(),
         dryRun = payload.dryRun == true,
@@ -1351,20 +1609,34 @@ local function applyPlanHandler(payload)
         skipped = 0,
         refused = 0,
         changedPaths = {},
-        warnings = {}
+        refusedPaths = {},
+        operationResults = {},
+        warnings = {},
+        snapshotRecorded = false,
+        rolledBack = false
     }
     if not result.dryRun then
         result.snapshotBefore = Serializer.serialize(root)
         result.restoreParentPath = parentPathOf(payload.rootPath)
+        result.snapshotRecorded = true
     end
     local options = {
         dryRun = result.dryRun,
         force = payload.force == true,
         onlySet = toSet(payload.only),
         excludeSet = toSet(payload.exclude),
+        sourceId = type(payload.plan.sourceId) == "string" and payload.plan.sourceId or nil,
         sourcePrefix = "apply-plan:" .. root:GetFullName()
     }
-    for _, change in ipairs(changes) do
+    for index, item in ipairs(operations) do
+        local change = item.change
+        local before = {
+            applied = result.applied,
+            skipped = result.skipped,
+            refused = result.refused,
+            warnings = #result.warnings,
+            changedPaths = #result.changedPaths
+        }
         if not changeAllowed(change, options.onlySet) then
             result.skipped += 1
         elseif change.kind == "added" then
@@ -1377,6 +1649,7 @@ local function applyPlanHandler(payload)
             result.skipped += 1
             table.insert(result.warnings, "unknown change kind: " .. tostring(change.kind))
         end
+        recordOperationResult(result, index, item.operation, change, before)
     end
     if not result.dryRun and result.refused > 0 and result.snapshotBefore then
         local restored, restoreWarningsOrErr = restoreSnapshot(result.snapshotBefore, result.restoreParentPath)
@@ -1398,7 +1671,7 @@ return applyPlanHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="9">
+      <Item class="ModuleScript" referent="10">
         <Properties>
           <string name="Name">Create</string>
           <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
@@ -1503,32 +1776,12 @@ return createHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="10">
+      <Item class="ModuleScript" referent="11">
         <Properties>
           <string name="Name">Deps</string>
           <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
 local Ownership = require(script.Parent.Parent.Ownership)
-
-local ASSET_PROPERTIES = {
-    MeshPart = { MeshId = "mesh", TextureID = "image", TextureId = "image" },
-    SpecialMesh = { MeshId = "mesh", TextureId = "image", TextureID = "image" },
-    Decal = { Texture = "image" },
-    Texture = { Texture = "image" },
-    ImageLabel = { Image = "image" },
-    ImageButton = { Image = "image" },
-    ScrollingFrame = { BottomImage = "image", MidImage = "image", TopImage = "image" },
-    Sound = { SoundId = "audio" },
-    Animation = { AnimationId = "animation" },
-    ParticleEmitter = { Texture = "image" },
-    Trail = { Texture = "image" },
-    Beam = { Texture = "image" },
-    SurfaceAppearance = {
-        ColorMap = "image",
-        MetalnessMap = "image",
-        NormalMap = "image",
-        RoughnessMap = "image"
-    }
-}
+local Diagnostics = require(script.Parent.Parent.Diagnostics)
 
 local SCRIPT_CLASSES = {
     Script = true,
@@ -1566,6 +1819,19 @@ local function isAssetUri(value)
     return type(value) == "string" and value ~= ""
 end
 
+local function hasFallbackAsset(instance, meta)
+    if type(meta.fallbackProperties) ~= "table" then
+        return false
+    end
+    for _, property in ipairs(meta.fallbackProperties) do
+        local value = readProperty(instance, property)
+        if value ~= nil and tostring(value) ~= "" then
+            return true
+        end
+    end
+    return false
+end
+
 local function flagsFor(instance, value)
     local flags = {}
     if type(value) ~= "string" or value == "" then
@@ -1581,6 +1847,29 @@ local function flagsFor(instance, value)
         table.insert(flags, "largeEditableRisk")
     end
     return flags
+end
+
+local function ruleIdsFor(kind, flags)
+    local ids = {}
+    local seen = {}
+    local function add(id)
+        if not seen[id] then
+            seen[id] = true
+            table.insert(ids, id)
+        end
+    end
+    for _, flag in ipairs(flags) do
+        if flag == "missing" or flag == "empty" then
+            add(Diagnostics.missingAssetRule(kind))
+        elseif flag == "privateRisk" then
+            add("asset.private-risk")
+        elseif flag == "unowned" then
+            add("ownership.unowned")
+        elseif flag == "largeEditableRisk" then
+            add("asset.editable.large-risk")
+        end
+    end
+    return ids
 end
 
 local function depsHandler(payload)
@@ -1610,18 +1899,20 @@ local function depsHandler(payload)
         if instance.ClassName == "EditableImage" or instance.ClassName == "EditableMesh" then
             table.insert(warnings, "large editable asset risk: " .. instance:GetFullName())
         end
-        local props = ASSET_PROPERTIES[instance.ClassName]
+        local props = Diagnostics.assetPropertiesFor(instance)
         if props then
-            for property, kind in pairs(props) do
+            for property, meta in pairs(props) do
                 local value = readProperty(instance, property)
-                if isAssetUri(value) or property == "MeshId" or property == "SoundId" or property == "Image" or property == "AnimationId" then
+                if isAssetUri(value) or (meta.reportWhenMissing == true and not hasFallbackAsset(instance, meta)) then
+                    local flags = flagsFor(instance, value)
                     table.insert(dependencies, {
                         path = instance:GetFullName(),
                         className = instance.ClassName,
                         property = property,
-                        kind = kind,
+                        kind = meta.kind,
                         value = tostring(value or ""),
-                        flags = flagsFor(instance, value)
+                        flags = flags,
+                        ruleIds = ruleIdsFor(meta.kind, flags)
                     })
                 end
             end
@@ -1645,7 +1936,7 @@ return depsHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="11">
+      <Item class="ModuleScript" referent="12">
         <Properties>
           <string name="Name">Deserialize</string>
           <string name="Source"><![CDATA[local Deserializer = require(script.Parent.Parent.Deserializer)
@@ -1840,7 +2131,7 @@ return deserializeHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="12">
+      <Item class="ModuleScript" referent="13">
         <Properties>
           <string name="Name">Exec</string>
           <string name="Source"><![CDATA[local Encoders = require(script.Parent.Parent.PropertyEncoders)
@@ -1882,7 +2173,7 @@ return execHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="13">
+      <Item class="ModuleScript" referent="14">
         <Properties>
           <string name="Name">Export</string>
           <string name="Source"><![CDATA[local Exporter = require(script.Parent.Parent.Exporter)
@@ -1913,7 +2204,7 @@ return exportHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="14">
+      <Item class="ModuleScript" referent="15">
         <Properties>
           <string name="Name">History</string>
           <string name="Source"><![CDATA[local AuditLog = require(script.Parent.Parent.AuditLog)
@@ -1948,7 +2239,7 @@ return historyHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="15">
+      <Item class="ModuleScript" referent="16">
         <Properties>
           <string name="Name">ImportAsset</string>
           <string name="Source"><![CDATA[local Importer = require(script.Parent.Parent.Importer)
@@ -1981,7 +2272,7 @@ return importAssetHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="16">
+      <Item class="ModuleScript" referent="17">
         <Properties>
           <string name="Name">ImportAudio</string>
           <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
@@ -2000,6 +2291,21 @@ local function normalizeAssetId(value)
     return value
 end
 
+local function directChildWithSourceId(parent, sourceId)
+    if type(sourceId) ~= "string" or sourceId == "" then
+        return nil
+    end
+    for _, child in ipairs(parent:GetChildren()) do
+        local ok, childSourceId, managedBy = pcall(function()
+            return child:GetAttribute("rsSourceId"), child:GetAttribute("rsManagedBy")
+        end)
+        if ok and childSourceId == sourceId and managedBy == "rs" then
+            return child
+        end
+    end
+    return nil
+end
+
 local function importAudioHandler(payload)
     if type(payload.parentPath) ~= "string" then
         return { ok = false, error = "parentPath missing" }
@@ -2016,13 +2322,14 @@ local function importAudioHandler(payload)
     local soundPaths = {}
     local warnings = {}
     local sourceId = Ownership.sourceId(payload, "audio")
+    local useSourceLookup = #payload.sounds == 1
     for index, spec in ipairs(payload.sounds) do
         local soundId = normalizeAssetId(spec.assetId)
         if not soundId then
             return { ok = false, error = "sound " .. tostring(index) .. " missing assetId" }
         end
         local name = StudioPath.sanitize(spec.name, "Sound")
-        local existing = parent:FindFirstChild(name)
+        local existing = (useSourceLookup and directChildWithSourceId(parent, sourceId)) or parent:FindFirstChild(name)
         if existing and not existing:IsA("Sound") then
             existing:Destroy()
             existing = nil
@@ -2057,7 +2364,7 @@ return importAudioHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="17">
+      <Item class="ModuleScript" referent="18">
         <Properties>
           <string name="Name">ImportImage</string>
           <string name="Source"><![CDATA[local ImportImage = require(script.Parent.Parent.ImportImage)
@@ -2090,16 +2397,39 @@ return importImageHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="18">
+      <Item class="ModuleScript" referent="19">
         <Properties>
           <string name="Name">ImportUiPack</string>
           <string name="Source"><![CDATA[local ImportImage = require(script.Parent.Parent.ImportImage)
 local Ownership = require(script.Parent.Parent.Ownership)
 local StudioPath = require(script.Parent.Parent.StudioPath)
 
-local function resolveContainer(parent, name)
+local function directChildWithSourceId(parent, sourceId)
+    if type(sourceId) ~= "string" or sourceId == "" then
+        return nil
+    end
+    for _, child in ipairs(parent:GetChildren()) do
+        local ok, childSourceId, managedBy = pcall(function()
+            return child:GetAttribute("rsSourceId"), child:GetAttribute("rsManagedBy")
+        end)
+        if ok and childSourceId == sourceId and managedBy == "rs" then
+            return child
+        end
+    end
+    return nil
+end
+
+local function resolveContainer(parent, name, sourceId)
     if parent:IsA("StarterGui") or parent:IsA("PlayerGui") then
         local guiName = StudioPath.sanitize(name, "ImportedGui")
+        local existingBySource = directChildWithSourceId(parent, sourceId)
+        if existingBySource and existingBySource:IsA("ScreenGui") then
+            existingBySource.Name = guiName
+            existingBySource.ResetOnSpawn = false
+            return existingBySource, existingBySource, nil
+        elseif existingBySource then
+            existingBySource:Destroy()
+        end
         local existing = parent:FindFirstChild(guiName)
         if existing and existing:IsA("ScreenGui") then
             return existing, existing, nil
@@ -2218,11 +2548,11 @@ local function importUiPackHandler(payload)
         return { ok = false, error = resolveErr }
     end
 
-    local container, guiRoot, containerErr = resolveContainer(parent, payload.name)
+    local sourceId = Ownership.sourceId(payload, "ui")
+    local container, guiRoot, containerErr = resolveContainer(parent, payload.name, sourceId)
     if not container then
         return { ok = false, error = containerErr }
     end
-    local sourceId = Ownership.sourceId(payload, "ui")
     Ownership.stamp(guiRoot, sourceId)
 
     local elementPaths = {}
@@ -2251,7 +2581,7 @@ return importUiPackHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="19">
+      <Item class="ModuleScript" referent="20">
         <Properties>
           <string name="Name">ImportUploaded</string>
           <string name="Source"><![CDATA[local Ownership = require(script.Parent.Parent.Ownership)
@@ -2270,8 +2600,31 @@ local function normalizeAssetId(value)
     return value
 end
 
-local function ensureImageContainer(parent, name)
+local function directChildWithSourceId(parent, sourceId)
+    if type(sourceId) ~= "string" or sourceId == "" then
+        return nil
+    end
+    for _, child in ipairs(parent:GetChildren()) do
+        local ok, childSourceId, managedBy = pcall(function()
+            return child:GetAttribute("rsSourceId"), child:GetAttribute("rsManagedBy")
+        end)
+        if ok and childSourceId == sourceId and managedBy == "rs" then
+            return child
+        end
+    end
+    return nil
+end
+
+local function ensureImageContainer(parent, name, sourceId)
     if parent:IsA("StarterGui") or parent:IsA("PlayerGui") then
+        local existing = directChildWithSourceId(parent, sourceId)
+        if existing and existing:IsA("ScreenGui") then
+            existing.Name = name .. "Gui"
+            existing.ResetOnSpawn = false
+            return existing, existing
+        elseif existing then
+            existing:Destroy()
+        end
         local gui = Instance.new("ScreenGui")
         gui.Name = name .. "Gui"
         gui.ResetOnSpawn = false
@@ -2283,9 +2636,17 @@ end
 
 local function importImage(payload, parent, assetId, sourceId)
     local name = StudioPath.sanitize(payload.name, "UploadedImage")
-    local container, root = ensureImageContainer(parent, name)
+    local container, root = ensureImageContainer(parent, name, sourceId)
     local uiKind = tostring(payload.uiKind or "image")
-    local object = uiKind == "button" and Instance.new("ImageButton") or Instance.new("ImageLabel")
+    local className = uiKind == "button" and "ImageButton" or "ImageLabel"
+    local object = directChildWithSourceId(container, sourceId)
+    if object and object.ClassName ~= className then
+        object:Destroy()
+        object = nil
+    end
+    if not object then
+        object = Instance.new(className)
+    end
     object.Name = name
     object.BackgroundTransparency = 1
     object.BorderSizePixel = 0
@@ -2300,7 +2661,12 @@ local function importImage(payload, parent, assetId, sourceId)
 end
 
 local function importAudio(payload, parent, assetId, sourceId)
-    local sound = Instance.new("Sound")
+    local sound = directChildWithSourceId(parent, sourceId)
+    if sound and not sound:IsA("Sound") then
+        sound:Destroy()
+        sound = nil
+    end
+    sound = sound or Instance.new("Sound")
     sound.Name = StudioPath.sanitize(payload.name, "UploadedSound")
     sound.SoundId = assetId
     if payload.volume ~= nil then
@@ -2357,7 +2723,7 @@ return importUploadedHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="20">
+      <Item class="ModuleScript" referent="21">
         <Properties>
           <string name="Name">PackageUpdate</string>
           <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
@@ -2429,16 +2795,25 @@ local function findMatchingChild(targetParent, incoming)
     return targetParent:FindFirstChild(incoming.Name)
 end
 
+local function recordPath(list, path)
+    if type(path) == "string" and path ~= "" then
+        table.insert(list, path)
+    end
+end
+
 local function mergeChildren(target, incoming, options, result)
     for _, child in ipairs(incoming:GetChildren()) do
         local existing = findMatchingChild(target, child)
         if not existing then
             result.created += 1
-            table.insert(result.changedPaths, target:GetFullName() .. "." .. child.Name)
+            local createdPath = target:GetFullName() .. "." .. child.Name
+            recordPath(result.changedPaths, createdPath)
+            recordPath(result.createdPaths, createdPath)
             if not options.dryRun then
                 child.Parent = target
             end
         else
+            local existingPath = existing:GetFullName()
             local canMutate, mutateErr = Ownership.canMutate(existing, {
                 force = options.force,
                 packageId = options.packageId,
@@ -2447,12 +2822,15 @@ local function mergeChildren(target, incoming, options, result)
             if not canMutate then
                 if options.mode == "preserve-local" then
                     result.preserved += 1
+                    recordPath(result.preservedPaths, existingPath)
                     table.insert(result.warnings, mutateErr)
                     if not options.dryRun then
                         child:Destroy()
                     end
                 else
                     result.refused += 1
+                    recordPath(result.refusedPaths, existingPath)
+                    recordPath(result.unownedPaths, existingPath)
                     table.insert(result.warnings, mutateErr)
                     if not options.dryRun then
                         child:Destroy()
@@ -2461,12 +2839,14 @@ local function mergeChildren(target, incoming, options, result)
             elseif options.mode == "preserve-local" then
                 mergeChildren(existing, child, options, result)
                 result.preserved += 1
+                recordPath(result.preservedPaths, existingPath)
                 if not options.dryRun then
                     child:Destroy()
                 end
             else
                 result.replaced += 1
-                table.insert(result.changedPaths, existing:GetFullName())
+                recordPath(result.changedPaths, existingPath)
+                recordPath(result.replacedPaths, existingPath)
                 if not options.dryRun then
                     local parent = existing.Parent
                     existing:Destroy()
@@ -2512,15 +2892,15 @@ local function packageUpdateHandler(payload)
         preserved = 0,
         refused = 0,
         changedPaths = {},
+        createdPaths = {},
+        replacedPaths = {},
+        preservedPaths = {},
+        refusedPaths = {},
+        unownedPaths = {},
+        rollbackAvailable = existing ~= nil,
+        snapshotRecorded = false,
         warnings = {}
     }
-
-    if dryRun and mode == "conflict-report" then
-        if existing and not result.owned and payload.force ~= true then
-            table.insert(result.warnings, "existing install is not owned by rs/package: " .. existing:GetFullName())
-        end
-        return { ok = true, data = result }
-    end
 
     local temp = tempParent()
     local imported, warningsOrErr, idMap = Deserializer.deserialize(payload.blob, temp)
@@ -2533,9 +2913,11 @@ local function packageUpdateHandler(payload)
         table.insert(result.warnings, warning)
     end
 
+    local rootRefused = false
     if existing and not dryRun then
         result.snapshotBefore = Serializer.serialize(existing)
         result.restoreParentPath = parent:GetFullName()
+        result.snapshotRecorded = true
     end
 
     if existing then
@@ -2545,22 +2927,28 @@ local function packageUpdateHandler(payload)
             sourceId = rootSourceId
         })
         if not canMutate and mode ~= "preserve-local" then
+            rootRefused = true
             result.refused += 1
+            recordPath(result.refusedPaths, existing:GetFullName())
+            recordPath(result.unownedPaths, existing:GetFullName())
             table.insert(result.warnings, mutateErr)
         end
     end
 
-    if result.refused == 0 then
+    if result.refused == 0 or (dryRun and not (rootRefused and mode == "replace-owned")) then
         if not existing then
             result.created += 1
-            table.insert(result.changedPaths, parent:GetFullName() .. "." .. imported.Name)
+            local createdPath = parent:GetFullName() .. "." .. imported.Name
+            recordPath(result.changedPaths, createdPath)
+            recordPath(result.createdPaths, createdPath)
             if not dryRun then
                 imported.Parent = parent
             end
             result.rootPath = parent:GetFullName() .. "." .. imported.Name
         elseif mode == "replace-owned" then
             result.replaced += 1
-            table.insert(result.changedPaths, existing:GetFullName())
+            recordPath(result.changedPaths, existing:GetFullName())
+            recordPath(result.replacedPaths, existing:GetFullName())
             if not dryRun then
                 existing:Destroy()
                 imported.Parent = parent
@@ -2598,7 +2986,7 @@ return packageUpdateHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="21">
+      <Item class="ModuleScript" referent="22">
         <Properties>
           <string name="Name">Read</string>
           <string name="Source"><![CDATA[local Serializer = require(script.Parent.Parent.Serializer)
@@ -2619,7 +3007,7 @@ return readHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="22">
+      <Item class="ModuleScript" referent="23">
         <Properties>
           <string name="Name">RepairTool</string>
           <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
@@ -2648,7 +3036,7 @@ return repairToolHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="23">
+      <Item class="ModuleScript" referent="24">
         <Properties>
           <string name="Name">Serialize</string>
           <string name="Source"><![CDATA[local Serializer = require(script.Parent.Parent.Serializer)
@@ -2669,7 +3057,7 @@ return serializeHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="24">
+      <Item class="ModuleScript" referent="25">
         <Properties>
           <string name="Name">Snapshot</string>
           <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
@@ -2690,7 +3078,7 @@ return snapshotHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="25">
+      <Item class="ModuleScript" referent="26">
         <Properties>
           <string name="Name">UpsertFiles</string>
           <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
@@ -2702,21 +3090,125 @@ local SCRIPT_CLASSES = {
     ModuleScript = true
 }
 
-local function splitRelativePath(path)
-    local parts = {}
-    for part in string.gmatch(tostring(path or ""), "[^/\\]+") do
-        if part ~= "." and part ~= "" then
-            table.insert(parts, part)
-        end
-    end
-    return parts
+local RESERVED_NAMES = {
+    CON = true,
+    PRN = true,
+    AUX = true,
+    NUL = true,
+    COM1 = true,
+    COM2 = true,
+    COM3 = true,
+    COM4 = true,
+    COM5 = true,
+    COM6 = true,
+    COM7 = true,
+    COM8 = true,
+    COM9 = true,
+    LPT1 = true,
+    LPT2 = true,
+    LPT3 = true,
+    LPT4 = true,
+    LPT5 = true,
+    LPT6 = true,
+    LPT7 = true,
+    LPT8 = true,
+    LPT9 = true
+}
+
+local function isReservedName(segment)
+    local stem = string.match(segment, "^[^%.]+") or segment
+    return RESERVED_NAMES[string.upper(stem)] == true
 end
 
-local function ensureFolder(parent, name, dryRun, sourceId)
+local function validatePathSegment(segment, originalPath)
+    if segment == "" then
+        return "path contains an empty segment: " .. tostring(originalPath)
+    end
+    if segment == "." or segment == ".." then
+        return "path contains an ambiguous segment '" .. segment .. "': " .. tostring(originalPath)
+    end
+    if string.match(segment, "[<>:\"|%?%*%c]") then
+        return "path contains an invalid filename character: " .. tostring(originalPath)
+    end
+    if string.sub(segment, -1) == "." or string.sub(segment, -1) == " " then
+        return "path segment must not end with '.' or space: " .. tostring(originalPath)
+    end
+    if isReservedName(segment) then
+        return "path contains a reserved filename segment '" .. segment .. "': " .. tostring(originalPath)
+    end
+    return nil
+end
+
+local function splitRelativePath(path)
+    if type(path) ~= "string" or path == "" then
+        return nil, "path missing"
+    end
+    if string.sub(path, 1, 1) == "/" or string.sub(path, 1, 1) == "\\" then
+        return nil, "path must be relative: " .. tostring(path)
+    end
+    if string.match(path, "^%a:") then
+        return nil, "path must not use a drive prefix: " .. tostring(path)
+    end
+    if string.find(path, ":", 1, true) then
+        return nil, "path contains an ambiguous ':' segment: " .. tostring(path)
+    end
+
+    local normalized = string.gsub(path, "\\", "/")
+    if string.sub(normalized, -1) == "/" or string.find(normalized, "//", 1, true) then
+        return nil, "path contains an empty segment: " .. tostring(path)
+    end
+
+    local parts = {}
+    for part in string.gmatch(normalized, "[^/]+") do
+        local err = validatePathSegment(part, path)
+        if err then
+            return nil, err
+        end
+        table.insert(parts, part)
+    end
+    if #parts == 0 then
+        return nil, "path missing"
+    end
+    return parts, nil
+end
+
+local function sourceMatches(instance, sourceId)
+    local existingSourceId = nil
+    pcall(function()
+        existingSourceId = instance:GetAttribute("rsSourceId")
+    end)
+    return type(sourceId) == "string" and sourceId ~= "" and existingSourceId == sourceId
+end
+
+local function canMutateSynced(instance, sourceId, force)
+    if force == true then
+        return true, nil
+    end
+    if sourceMatches(instance, sourceId) then
+        return true, nil
+    end
+    local path = "<unknown>"
+    pcall(function()
+        path = instance:GetFullName()
+    end)
+    return false, "refusing to overwrite synced instance from a different source: " .. path .. " (pass --force to override)"
+end
+
+local function ensureFolder(parent, name, dryRun, sourceId, force)
     local existing = parent:FindFirstChild(name)
     if existing then
         if not existing:IsA("Folder") then
             return nil, "path segment exists but is not a Folder: " .. existing:GetFullName()
+        end
+        local isGenerated = false
+        pcall(function()
+            isGenerated = existing:GetAttribute("rsSyncGenerated") == true or existing:GetAttribute("rsManagedBy") == "rs"
+        end)
+        if isGenerated then
+            local canMutate, mutateErr = canMutateSynced(existing, sourceId, force)
+            if not canMutate then
+                return nil, mutateErr
+            end
         end
         return existing, false
     end
@@ -2731,11 +3223,14 @@ local function ensureFolder(parent, name, dryRun, sourceId)
     return folder, true
 end
 
-local function ensureParent(root, relativePath, dryRun, sourceId)
-    local parts = splitRelativePath(relativePath)
+local function ensureParent(root, relativePath, dryRun, sourceId, force)
+    local parts, pathErr = splitRelativePath(relativePath)
+    if not parts then
+        return nil, pathErr
+    end
     local parent = root
     for i = 1, math.max(#parts - 1, 0) do
-        local nextParent, err = ensureFolder(parent, parts[i], dryRun, sourceId)
+        local nextParent, err = ensureFolder(parent, parts[i], dryRun, sourceId, force)
         if not nextParent then
             return nil, err
         end
@@ -2750,7 +3245,12 @@ local function upsertItem(root, item, dryRun, sourceId, force)
         return nil, "className missing"
     end
     local name = StudioPath.sanitize(item.name, "Synced")
-    local parent, err = ensureParent(root, item.path, dryRun, sourceId)
+    local parts, pathErr = splitRelativePath(item.path)
+    if not parts then
+        return nil, pathErr
+    end
+    local normalizedPath = table.concat(parts, "/")
+    local parent, err = ensureParent(root, item.path, dryRun, sourceId, force)
     if not parent then
         return nil, err
     end
@@ -2759,10 +3259,7 @@ local function upsertItem(root, item, dryRun, sourceId, force)
     local created = false
     local updated = false
     if existing then
-        local canMutate, mutateErr = Ownership.canMutate(existing, {
-            sourceId = sourceId,
-            force = force
-        })
+        local canMutate, mutateErr = canMutateSynced(existing, sourceId, force)
         if not canMutate then
             return nil, mutateErr
         end
@@ -2804,7 +3301,7 @@ local function upsertItem(root, item, dryRun, sourceId, force)
     end
 
     if instance and not dryRun then
-        instance:SetAttribute("rsSyncPath", tostring(item.path or ""))
+        instance:SetAttribute("rsSyncPath", normalizedPath)
         instance:SetAttribute("rsSyncClassName", className)
         Ownership.stamp(instance, sourceId)
         for key, value in pairs(item.attributes or {}) do
@@ -2857,7 +3354,11 @@ local function upsertFilesHandler(payload)
     local sourceId = Ownership.sourceId(payload, "sync")
 
     for _, item in ipairs(payload.items) do
-        desired[tostring(item.path or "")] = true
+        local parts, pathErr = splitRelativePath(item.path)
+        if not parts then
+            return { ok = false, error = pathErr }
+        end
+        desired[table.concat(parts, "/")] = true
         local result, itemErr = upsertItem(root, item, dryRun, sourceId, payload.force == true)
         if not result then
             return { ok = false, error = itemErr }
@@ -2876,6 +3377,10 @@ local function upsertFilesHandler(payload)
     if payload.delete == true then
         for path, instance in pairs(collectOwned(root)) do
             if not desired[path] then
+                local canDelete, deleteErr = canMutateSynced(instance, sourceId, payload.force == true)
+                if not canDelete then
+                    return { ok = false, error = deleteErr }
+                end
                 deleted += 1
                 table.insert(changedPaths, instance:GetFullName())
                 if not dryRun then
@@ -2904,7 +3409,7 @@ return upsertFilesHandler
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="26">
+      <Item class="ModuleScript" referent="27">
         <Properties>
           <string name="Name">Validate</string>
           <string name="Source"><![CDATA[local StudioPath = require(script.Parent.Parent.StudioPath)
@@ -2926,7 +3431,7 @@ return validateHandler
         </Properties>
       </Item>
     </Item>
-    <Item class="ModuleScript" referent="27">
+    <Item class="ModuleScript" referent="28">
       <Properties>
         <string name="Name">Http</string>
         <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
@@ -2988,7 +3493,7 @@ return Http
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="28">
+    <Item class="ModuleScript" referent="29">
       <Properties>
         <string name="Name">ImportImage</string>
         <string name="Source"><![CDATA[local AssetService = game:GetService("AssetService")
@@ -3106,6 +3611,21 @@ local function resolveContainer(parent, name)
     return nil, nil, "parent must be StarterGui, PlayerGui, ScreenGui, SurfaceGui, BillboardGui, or a GuiObject"
 end
 
+local function directChildWithSourceId(parent, sourceId)
+    if type(sourceId) ~= "string" or sourceId == "" then
+        return nil
+    end
+    for _, child in ipairs(parent:GetChildren()) do
+        local ok, childSourceId, managedBy = pcall(function()
+            return child:GetAttribute("rsSourceId"), child:GetAttribute("rsManagedBy")
+        end)
+        if ok and childSourceId == sourceId and managedBy == "rs" then
+            return child
+        end
+    end
+    return nil
+end
+
 local function createImageObject(kind)
     if kind == "button" then
         local button = Instance.new("ImageButton")
@@ -3147,6 +3667,7 @@ function ImportImage.import(payload, parent)
 
     local name = sanitize(payload.name)
     local sourceId = Ownership.sourceId(payload, "image")
+    local existingManaged = directChildWithSourceId(parent, sourceId)
     local container, guiRoot, containerErr = resolveContainer(parent, name)
     if not container then
         return nil, containerErr
@@ -3183,6 +3704,9 @@ function ImportImage.import(payload, parent)
         return nil, "ImageContent assignment failed: " .. tostring(contentErr)
     end
 
+    if existingManaged and existingManaged ~= guiRoot and existingManaged ~= imageObject then
+        existingManaged:Destroy()
+    end
     imageObject.Parent = container
     Ownership.stamp(guiRoot, sourceId)
     Ownership.stamp(imageObject, sourceId)
@@ -3207,7 +3731,7 @@ return ImportImage
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="29">
+    <Item class="ModuleScript" referent="30">
       <Properties>
         <string name="Name">Importer</string>
         <string name="Source"><![CDATA[local AssetService = game:GetService("AssetService")
@@ -3284,6 +3808,21 @@ local function hierarchyParent(root, hierarchyPath)
         parent = child
     end
     return parent
+end
+
+local function directChildWithSourceId(parent, sourceId)
+    if type(sourceId) ~= "string" or sourceId == "" then
+        return nil
+    end
+    for _, child in ipairs(parent:GetChildren()) do
+        local ok, childSourceId, managedBy = pcall(function()
+            return child:GetAttribute("rsSourceId"), child:GetAttribute("rsManagedBy")
+        end)
+        if ok and childSourceId == sourceId and managedBy == "rs" then
+            return child
+        end
+    end
+    return nil
 end
 
 local function applyMeshMetadata(part, mesh, warnings)
@@ -3462,9 +4001,14 @@ function Importer.import(payload, parent)
     end
 
     local warnings = {}
+    local sourceId = Ownership.sourceId(payload, "asset")
+    local existingRoot = directChildWithSourceId(parent, sourceId)
+    if existingRoot then
+        existingRoot:Destroy()
+    end
+
     local root = Instance.new("Model")
     root.Name = sanitize(payload.name)
-    local sourceId = Ownership.sourceId(payload, "asset")
     Ownership.stamp(root, sourceId)
 
     local parts = {}
@@ -3513,23 +4057,12 @@ return Importer
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="30">
+    <Item class="ModuleScript" referent="31">
       <Properties>
         <string name="Name">Inspector</string>
         <string name="Source"><![CDATA[local Inspector = {}
-
-local ASSET_PROPERTIES = {
-    AnimationId = "animation",
-    BottomImage = "image",
-    Image = "image",
-    MidImage = "image",
-    MeshId = "mesh",
-    SoundId = "audio",
-    TopImage = "image",
-    Texture = "image",
-    TextureID = "image",
-    TextureId = "image"
-}
+local Diagnostics = require(script.Parent.Diagnostics)
+local Fixes = Diagnostics.Fixes
 
 local REF_PROPERTIES = {
     Weld = { "Part0", "Part1" },
@@ -3641,7 +4174,7 @@ local function validateReferences(root, out)
                     if property == "Part0" or property == "Part1" or property == "Attachment0" or property == "Attachment1" then
                         severity = "fail"
                     end
-                    addDiagnostic(out, severity, "ref.missing", instance, property, property .. " is nil", "repair-tool")
+                    addDiagnostic(out, severity, "ref.missing", instance, property, property .. " is nil", nil)
                 elseif typeof(value) == "Instance" and not isInside(value, root) then
                     addDiagnostic(out, "warn", "ref.external", instance, property, property .. " points outside the validated subtree", nil)
                 end
@@ -3670,6 +4203,16 @@ local function rigidJointParts(joint)
         return p0, p1
     end
     return nil, nil
+end
+
+local function allToolJoints(tool)
+    local joints = {}
+    for _, descendant in ipairs(tool:GetDescendants()) do
+        if RIGID_JOINT_CLASSES[descendant.ClassName] then
+            table.insert(joints, descendant)
+        end
+    end
+    return joints
 end
 
 local function connectedToHandle(tool, handle, parts)
@@ -3710,7 +4253,7 @@ local function validateTool(tool, out)
             requiresHandle = tool.RequiresHandle
         end)
         if requiresHandle then
-            addDiagnostic(out, "fail", "tool.handle.missing", tool, "Handle", "Tool requires a BasePart child named Handle", "repair-tool")
+            addDiagnostic(out, "fail", "tool.handle.missing", tool, "Handle", "Tool requires a BasePart child named Handle", nil)
         else
             addDiagnostic(out, "info", "tool.handle.optional", tool, "Handle", "Tool has RequiresHandle=false and no Handle", nil)
         end
@@ -3724,7 +4267,14 @@ local function validateTool(tool, out)
         end
     end
     if duplicateHandles > 1 then
-        addDiagnostic(out, "warn", "tool.handle.ambiguous", tool, "Handle", "Tool has multiple direct children named Handle", "repair-tool")
+        addDiagnostic(out, "warn", "tool.handle.ambiguous", tool, "Handle", "Tool has multiple direct children named Handle", nil)
+    end
+
+    for _, joint in ipairs(allToolJoints(tool)) do
+        local p0, p1 = rigidJointParts(joint)
+        if not p0 or not p1 then
+            addDiagnostic(out, "fail", "tool.joint.broken", joint, nil, "Rigid joint has missing or invalid Part0/Part1", Fixes.TOOL_REMOVE_BROKEN_JOINTS)
+        end
     end
 
     local parts = collectBaseParts(tool)
@@ -3735,10 +4285,19 @@ local function validateTool(tool, out)
             anchored = part.Anchored
         end)
         if anchored then
-            addDiagnostic(out, "fail", "tool.part.anchored", part, "Anchored", "Tool BasePart is anchored", "repair-tool")
+            addDiagnostic(out, "fail", "tool.part.anchored", part, "Anchored", "Tool BasePart is anchored", Fixes.TOOL_UNANCHOR_PARTS)
+        end
+        if part ~= handle then
+            local canCollide = false
+            pcall(function()
+                canCollide = part.CanCollide
+            end)
+            if canCollide then
+                addDiagnostic(out, "warn", "tool.part.collision", part, "CanCollide", "Tool non-handle BasePart collides by default", Fixes.TOOL_SET_PART_PHYSICS)
+            end
         end
         if part ~= handle and not connected[part] then
-            addDiagnostic(out, "fail", "tool.part.disconnected", part, nil, "BasePart is not rigidly connected to Handle", "repair-tool")
+            addDiagnostic(out, "fail", "tool.part.disconnected", part, nil, "BasePart is not rigidly connected to Handle", Fixes.TOOL_WELD_DISCONNECTED_PARTS)
         end
     end
     addDiagnostic(out, "info", "tool.parts", tool, nil, "Tool contains " .. tostring(#parts) .. " BasePart descendant(s)", nil)
@@ -3754,21 +4313,48 @@ end
 
 local function validateAssets(root, out)
     for _, instance in ipairs(descendantsInclusive(root)) do
-        if instance:IsA("MeshPart") then
-            local meshId = readProperty(instance, "MeshId")
-            if type(meshId) ~= "string" or meshId == "" then
-                addDiagnostic(out, "warn", "asset.mesh.missing", instance, "MeshId", "MeshPart has an empty MeshId", nil)
+        local props = Diagnostics.assetPropertiesFor(instance)
+        if props then
+            local presentAssetCount = 0
+            for property, meta in pairs(props) do
+                local value, err = readProperty(instance, property)
+                if err then
+                    if meta.optionalProperty ~= true then
+                        table.insert(out.warnings, fullName(instance) .. "." .. property .. ": " .. err)
+                    end
+                else
+                    local present = false
+                    if type(value) == "string" then
+                        present = value ~= ""
+                    elseif value ~= nil then
+                        present = tostring(value) ~= ""
+                    end
+                    if not present and meta.fallbackProperties then
+                        for _, fallbackProperty in ipairs(meta.fallbackProperties) do
+                            local fallback = readProperty(instance, fallbackProperty)
+                            if fallback ~= nil and tostring(fallback) ~= "" then
+                                present = true
+                                break
+                            end
+                        end
+                    end
+                    if present then
+                        presentAssetCount += 1
+                    elseif meta.validateWhenMissing ~= false then
+                        addDiagnostic(
+                            out,
+                            "warn",
+                            Diagnostics.missingAssetRule(meta.kind),
+                            instance,
+                            property,
+                            instance.ClassName .. "." .. property .. " is empty",
+                            nil
+                        )
+                    end
+                end
             end
-        elseif instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
-            local image = readProperty(instance, "Image")
-            local imageContent = readProperty(instance, "ImageContent")
-            if (type(image) ~= "string" or image == "") and imageContent == nil then
-                addDiagnostic(out, "warn", "asset.image.missing", instance, "Image", "Image object has no Image or ImageContent", nil)
-            end
-        elseif instance:IsA("Sound") then
-            local soundId = readProperty(instance, "SoundId")
-            if type(soundId) ~= "string" or soundId == "" then
-                addDiagnostic(out, "warn", "asset.sound.missing", instance, "SoundId", "Sound has an empty SoundId", nil)
+            if instance.ClassName == "SurfaceAppearance" and presentAssetCount == 0 then
+                addDiagnostic(out, "warn", "asset.image.missing", instance, nil, "SurfaceAppearance has no texture maps", nil)
             end
         end
     end
@@ -3861,15 +4447,18 @@ function Inspector.snapshot(root, includePaths)
             remoteCount += 1
         end
 
-        for property, kind in pairs(ASSET_PROPERTIES) do
-            local assetUri = maybeAsset(instance, property)
-            if assetUri then
-                table.insert(assetRefs, {
-                    path = fullName(instance),
-                    property = property,
-                    assetUri = assetUri,
-                    assetKind = kind
-                })
+        local props = Diagnostics.assetPropertiesFor(instance)
+        if props then
+            for property, meta in pairs(props) do
+                local assetUri = maybeAsset(instance, property)
+                if assetUri then
+                    table.insert(assetRefs, {
+                        path = fullName(instance),
+                        property = property,
+                        assetUri = assetUri,
+                        assetKind = meta.kind
+                    })
+                end
             end
         end
 
@@ -3923,16 +4512,6 @@ function Inspector.snapshot(root, includePaths)
     }
 end
 
-local function allToolJoints(tool)
-    local joints = {}
-    for _, descendant in ipairs(tool:GetDescendants()) do
-        if RIGID_JOINT_CLASSES[descendant.ClassName] then
-            table.insert(joints, descendant)
-        end
-    end
-    return joints
-end
-
 function Inspector.repairTool(tool, options)
     options = options or {}
     local dryRun = options.dryRun == true
@@ -3946,6 +4525,8 @@ function Inspector.repairTool(tool, options)
     local result = {
         path = fullName(tool),
         dryRun = dryRun,
+        fixIds = {},
+        changedPaths = {},
         partsFound = #parts,
         validJointsPreserved = 0,
         brokenJointsFound = 0,
@@ -3953,6 +4534,16 @@ function Inspector.repairTool(tool, options)
         physicsPropertiesChanged = 0,
         warnings = {}
     }
+    local seenFixes = {}
+    local function recordFix(fixId, instance)
+        if fixId and not seenFixes[fixId] then
+            seenFixes[fixId] = true
+            table.insert(result.fixIds, fixId)
+        end
+        if instance then
+            table.insert(result.changedPaths, fullName(instance))
+        end
+    end
 
     for _, joint in ipairs(allToolJoints(tool)) do
         local p0, p1 = rigidJointParts(joint)
@@ -3960,8 +4551,11 @@ function Inspector.repairTool(tool, options)
             result.validJointsPreserved += 1
         else
             result.brokenJointsFound += 1
-            if options.replaceBroken == true and not dryRun then
-                joint:Destroy()
+            if options.replaceBroken == true then
+                recordFix(Fixes.TOOL_REMOVE_BROKEN_JOINTS, joint)
+                if not dryRun then
+                    joint:Destroy()
+                end
             end
         end
     end
@@ -3970,6 +4564,7 @@ function Inspector.repairTool(tool, options)
     for _, part in ipairs(parts) do
         if part ~= handle and not connected[part] then
             result.weldsCreated += 1
+            recordFix(Fixes.TOOL_WELD_DISCONNECTED_PARTS, part)
             if not dryRun then
                 local weld = Instance.new("WeldConstraint")
                 weld.Name = "rs_HandleWeld_" .. part.Name
@@ -3983,6 +4578,7 @@ function Inspector.repairTool(tool, options)
             local changed = false
             if part.Anchored ~= false then
                 changed = true
+                recordFix(Fixes.TOOL_UNANCHOR_PARTS, part)
                 if not dryRun then
                     part.Anchored = false
                 end
@@ -3994,12 +4590,14 @@ function Inspector.repairTool(tool, options)
                 end
                 if part.CanCollide ~= desiredCollision then
                     changed = true
+                    recordFix(Fixes.TOOL_SET_PART_PHYSICS, part)
                     if not dryRun then
                         part.CanCollide = desiredCollision
                     end
                 end
                 if options.massless ~= nil and part.Massless ~= options.massless then
                     changed = true
+                    recordFix(Fixes.TOOL_SET_PART_PHYSICS, part)
                     if not dryRun then
                         part.Massless = options.massless
                     end
@@ -4018,7 +4616,7 @@ return Inspector
 ]]></string>
       </Properties>
     </Item>
-    <Item class="Script" referent="31">
+    <Item class="Script" referent="32">
       <Properties>
         <string name="Name">Main</string>
         <token name="RunContext">0</token>
@@ -4217,7 +4815,7 @@ end)
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="32">
+    <Item class="ModuleScript" referent="33">
       <Properties>
         <string name="Name">Ownership</string>
         <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
@@ -4301,7 +4899,7 @@ return Ownership
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="33">
+    <Item class="ModuleScript" referent="34">
       <Properties>
         <string name="Name">PropertyAllowlist</string>
         <string name="Source"><![CDATA[local Allowlist = {}
@@ -4328,21 +4926,58 @@ local textObject = {
 }
 
 local imageObject = {
-    "Image", "ImageColor3", "ImageRectOffset", "ImageRectSize", "ImageTransparency",
+    "ImageColor3", "ImageRectOffset", "ImageRectSize", "ImageTransparency",
     "ScaleType", "SliceCenter", "TileSize"
 }
 
 local attachment = { "CFrame", "Position", "Orientation", "Axis", "SecondaryAxis", "Visible" }
+
+local contentPropertiesByClass = {
+    Animation = { AnimationId = "animation" },
+    Beam = { Texture = "image" },
+    Decal = { Texture = "image" },
+    ImageButton = { Image = "image" },
+    ImageLabel = { Image = "image" },
+    MeshPart = { MeshId = "mesh", TextureID = "image" },
+    ParticleEmitter = { Texture = "image" },
+    ScrollingFrame = { BottomImage = "image", MidImage = "image", TopImage = "image" },
+    Sound = { SoundId = "audio" },
+    SpecialMesh = { MeshId = "mesh", TextureId = "image" },
+    SurfaceAppearance = {
+        ColorMap = "image",
+        MetalnessMap = "image",
+        NormalMap = "image",
+        RoughnessMap = "image"
+    },
+    Texture = { Texture = "image" },
+    Trail = { Texture = "image" }
+}
+
+local contentPropertyOrder = {
+    Animation = { "AnimationId" },
+    Beam = { "Texture" },
+    Decal = { "Texture" },
+    ImageButton = { "Image" },
+    ImageLabel = { "Image" },
+    MeshPart = { "MeshId", "TextureID" },
+    ParticleEmitter = { "Texture" },
+    ScrollingFrame = { "BottomImage", "MidImage", "TopImage" },
+    Sound = { "SoundId" },
+    SpecialMesh = { "MeshId", "TextureId" },
+    SurfaceAppearance = { "ColorMap", "MetalnessMap", "NormalMap", "RoughnessMap" },
+    Texture = { "Texture" },
+    Trail = { "Texture" }
+}
 
 local byClass = {
     Folder = {},
     Configuration = {},
     Model = { "PrimaryPart", "WorldPivot" },
     Tool = { "CanBeDropped", "Enabled", "Grip", "GripForward", "GripPos", "GripRight", "GripUp", "ManualActivationOnly", "RequiresHandle", "ToolTip" },
-    MeshPart = { "MeshId", "TextureID", "CollisionFidelity", "DoubleSided", "RenderFidelity" },
-    SpecialMesh = { "MeshId", "MeshType", "Offset", "Scale", "TextureId", "VertexColor" },
+    MeshPart = { "CollisionFidelity", "DoubleSided", "RenderFidelity" },
+    SpecialMesh = { "MeshType", "Offset", "Scale", "VertexColor" },
     UnionOperation = { "UsePartColor" },
-    SurfaceAppearance = { "ColorMap", "NormalMap", "MetalnessMap", "RoughnessMap", "AlphaMode", "Color" },
+    SurfaceAppearance = { "AlphaMode", "Color" },
     Weld = { "Part0", "Part1", "C0", "C1" },
     ManualWeld = { "Part0", "Part1", "C0", "C1" },
     Motor = { "Part0", "Part1", "C0", "C1", "CurrentAngle", "DesiredAngle", "MaxVelocity" },
@@ -4355,16 +4990,16 @@ local byClass = {
     ModuleScript = { "Source" },
     AnimationController = {},
     Animator = {},
-    Animation = { "AnimationId" },
+    Animation = {},
     BindableEvent = {},
     BindableFunction = {},
     RemoteEvent = {},
     RemoteFunction = {},
-    Sound = { "SoundId", "Volume", "PlaybackSpeed", "Looped", "RollOffMode", "RollOffMinDistance", "RollOffMaxDistance", "EmitterSize", "Playing", "TimePosition" },
+    Sound = { "Volume", "PlaybackSpeed", "Looped", "RollOffMode", "RollOffMinDistance", "RollOffMaxDistance", "EmitterSize", "Playing", "TimePosition" },
     ParticleEmitter = {
         "Acceleration", "Brightness", "Color", "Drag", "EmissionDirection", "Enabled", "Lifetime",
         "LightEmission", "LightInfluence", "LockedToPart", "Orientation", "Rate", "RotSpeed",
-        "Rotation", "Size", "Speed", "SpreadAngle", "Texture", "Transparency", "VelocityInheritance",
+        "Rotation", "Size", "Speed", "SpreadAngle", "Transparency", "VelocityInheritance",
         "ZOffset"
     },
     PointLight = { "Brightness", "Color", "Enabled", "Range", "Shadows" },
@@ -4372,16 +5007,16 @@ local byClass = {
     SurfaceLight = { "Angle", "Brightness", "Color", "Enabled", "Face", "Range", "Shadows" },
     Beam = {
         "Attachment0", "Attachment1", "Brightness", "Color", "CurveSize0", "CurveSize1", "Enabled",
-        "FaceCamera", "LightEmission", "LightInfluence", "Segments", "Texture", "TextureLength",
+        "FaceCamera", "LightEmission", "LightInfluence", "Segments", "TextureLength",
         "TextureMode", "TextureSpeed", "Transparency", "Width0", "Width1", "ZOffset"
     },
     Trail = {
         "Attachment0", "Attachment1", "Color", "Enabled", "FaceCamera", "Lifetime", "LightEmission",
-        "LightInfluence", "MaxLength", "MinLength", "Texture", "TextureLength", "TextureMode",
+        "LightInfluence", "MaxLength", "MinLength", "TextureLength", "TextureMode",
         "Transparency", "WidthScale"
     },
-    Decal = { "Color3", "Face", "Texture", "Transparency" },
-    Texture = { "Color3", "Face", "StudsPerTileU", "StudsPerTileV", "Texture", "Transparency" },
+    Decal = { "Color3", "Face", "Transparency" },
+    Texture = { "Color3", "Face", "StudsPerTileU", "StudsPerTileV", "Transparency" },
     StringValue = { "Value" },
     NumberValue = { "Value" },
     BoolValue = { "Value" },
@@ -4400,7 +5035,7 @@ local byClass = {
     TextBox = { "ClearTextOnFocus", "CursorPosition", "MultiLine", "PlaceholderColor3", "PlaceholderText", "ShowNativeInput", "TextEditable" },
     ImageLabel = {},
     ImageButton = { "AutoButtonColor", "Modal", "Selected", "Style" },
-    ScrollingFrame = { "AutomaticCanvasSize", "BottomImage", "CanvasPosition", "CanvasSize", "ElasticBehavior", "HorizontalScrollBarInset", "MidImage", "ScrollBarImageColor3", "ScrollBarImageTransparency", "ScrollBarThickness", "ScrollingDirection", "ScrollingEnabled", "TopImage", "VerticalScrollBarInset", "VerticalScrollBarPosition" },
+    ScrollingFrame = { "AutomaticCanvasSize", "CanvasPosition", "CanvasSize", "ElasticBehavior", "HorizontalScrollBarInset", "ScrollBarImageColor3", "ScrollBarImageTransparency", "ScrollBarThickness", "ScrollingDirection", "ScrollingEnabled", "VerticalScrollBarInset", "VerticalScrollBarPosition" },
     UIListLayout = { "FillDirection", "HorizontalAlignment", "Padding", "SortOrder", "VerticalAlignment" },
     UIGridLayout = { "CellPadding", "CellSize", "FillDirection", "HorizontalAlignment", "SortOrder", "StartCorner", "VerticalAlignment" },
     UICorner = { "CornerRadius" },
@@ -4434,6 +5069,16 @@ local function append(target, source)
     end
 end
 
+local function appendContentProperties(target, className)
+    local names = contentPropertyOrder[className]
+    if not names then
+        return
+    end
+    for _, property in ipairs(names) do
+        table.insert(target, property)
+    end
+end
+
 function Allowlist.forInstance(instance)
     local props = {}
     append(props, common)
@@ -4455,14 +5100,38 @@ function Allowlist.forInstance(instance)
     end
 
     append(props, byClass[instance.ClassName] or {})
+    appendContentProperties(props, instance.ClassName)
     return props
+end
+
+function Allowlist.contentPropertiesForClass(className)
+    local source = contentPropertiesByClass[className]
+    local copy = {}
+    if source then
+        for property, kind in pairs(source) do
+            copy[property] = kind
+        end
+    end
+    return copy
+end
+
+function Allowlist.contentKindForClass(className, property)
+    local props = contentPropertiesByClass[className]
+    return props and props[property] or nil
+end
+
+function Allowlist.contentKindFor(instance, property)
+    if not instance then
+        return nil
+    end
+    return Allowlist.contentKindForClass(instance.ClassName, property)
 end
 
 return Allowlist
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="34">
+    <Item class="ModuleScript" referent="35">
       <Properties>
         <string name="Name">PropertyEncoders</string>
         <string name="Source"><![CDATA[local Encoders = {}
@@ -4615,7 +5284,7 @@ return Encoders
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="35">
+    <Item class="ModuleScript" referent="36">
       <Properties>
         <string name="Name">Serializer</string>
         <string name="Source"><![CDATA[local CollectionService = game:GetService("CollectionService")
@@ -4766,7 +5435,7 @@ return Serializer
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="36">
+    <Item class="ModuleScript" referent="37">
       <Properties>
         <string name="Name">StudioPath</string>
         <string name="Source"><![CDATA[local StudioPath = {}

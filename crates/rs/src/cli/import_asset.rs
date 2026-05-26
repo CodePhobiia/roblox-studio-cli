@@ -25,6 +25,7 @@ pub fn run(
     }
 
     let import_name = name.unwrap_or_else(|| file_stem(&file));
+    let source_id = crate::cli::import_uploaded::stable_file_source_id("asset-file", &file)?;
     let texture_resolver = TextureResolver::load(texture_root.as_deref())?;
     let meshes = load_mesh_file(&file, scale, &texture_resolver)?;
     if meshes.is_empty() {
@@ -44,7 +45,7 @@ pub fn run(
             meshes,
             anchored,
             weld,
-            source_id: None,
+            source_id: Some(source_id),
         },
         210,
     )?;

@@ -186,7 +186,7 @@ Private alpha first run: follow the proof-bound starter shop path in [Getting St
 | `rs transfer --from "A:Path" --to "B:ParentPath" --rehost-images --profile targetgroup` | Copy or plan an instance-tree transfer, optionally rehosting image refs |
 | `rs bridge serve/status/stop` | Manage the local bridge daemon |
 
-The bridge listens on `127.0.0.1:7878` by default and can be changed with `--port` or `RS_BRIDGE_PORT`. CLI-facing bridge routes require a local token sent by the `rs` binary. Set `RS_BRIDGE_TOKEN` only for trusted local tooling that must call the bridge directly.
+The bridge listens on `127.0.0.1:7878` by default and can be changed with `--port` or `RS_BRIDGE_PORT`. CLI-facing bridge routes require a local token sent by the `rs` binary in the `x-rs-bridge-token` header. The CLI reads `RS_BRIDGE_TOKEN` first, then the file named by `RS_BRIDGE_TOKEN_FILE`, then the default token file at `%USERPROFILE%\.rs-bridge-token` or `$HOME/.rs-bridge-token`; if no token file exists, it creates one. Set `RS_BRIDGE_TOKEN` only for trusted local tooling that must call the bridge directly.
 
 Transfers validate refs, welds, and Tools after deserialize. If a weld or attachment constraint points outside the selected source root, transfer a common parent containing both endpoints or pass `--allow-external-refs` to accept the missing link intentionally.
 
@@ -214,39 +214,74 @@ Restart Studio. The plugin registers with the local bridge and starts polling fo
 
 ## Quick Start
 
+The examples below are grouped by side effect so offline proof, live dry-runs, live applies, and cloud operations do not blur together.
+
+### Offline
+
+These commands do not require a live Studio session or Roblox Open Cloud access. Some write local files.
+
+```powershell
+rs install-plugin
+rs diff --export ".\exports\old" --against-export ".\exports\new" --fix-plan --format json > ".\plan.json"
+rs package verify --file ".\packages\sniper-skins.rspkg"
+rs package pack ".\packages\sniper-skins.rspkg" --out ".\packages\sniper-skins.rspkg.zip"
+```
+
+### Live Read / Diagnose
+
+These commands require the local bridge and a registered Studio session, but they are intended to inspect or report state.
+
 ```powershell
 rs list
-rs exec --studio "Snipe a Slime!" --allow-dangerous-exec --lua "return #game.ReplicatedStorage:GetChildren()"
+rs doctor
 rs read --studio "Snipe a Slime!" --path "Workspace" --depth 1
 rs export --studio "Snipe a Slime!" --path "ServerStorage.SniperSkins" --out ".\exports\snipers"
+rs snapshot --studio "Snipe a Slime!" --path "Workspace" --format json
+rs sync pull --studio "Snipe a Slime!" --path "Workspace.Crate" --out ".\pulled\crate" --overwrite
+rs package --studio "Snipe a Slime!" --path "ServerStorage.SniperSkins" --out ".\packages\sniper-skins.rspkg"
+rs deps --studio "Snipe a Slime!" --path "Workspace.Rifle"
+rs publish-check --studio "Snipe a Slime!" --path "Workspace.Rifle" --package ".\packages\sniper-skins.rspkg"
+```
+
+### Live Dry-Run
+
+These commands require Studio and the bridge, but request no mutation.
+
+```powershell
+rs apply-plan --studio "Snipe a Slime!" --root Workspace.Crate --file ".\plan.json" --dry-run --only added,modified --exclude Scripts
+rs package import --studio "Snipe a Slime!" --file ".\packages\sniper-skins.rspkg" --to ServerStorage --if-exists rename --dry-run
+rs package update --studio "Snipe a Slime!" --file ".\packages\sniper-skins.rspkg" --to ServerStorage --owned-only --dry-run
+rs transfer --from "Snipe for Brainrots!:StarterGui.ShopGui" --to "Snipe a Slime!:StarterGui" --dry-run
+```
+
+### Live Apply
+
+These commands require Studio and the bridge and can mutate the open place.
+
+```powershell
+rs exec --studio "Snipe a Slime!" --allow-dangerous-exec --lua "return #game.ReplicatedStorage:GetChildren()"
 rs import-asset --studio "Snipe a Slime!" --file ".\assets\crate.obj" --to "Workspace" --name "Crate"
 rs import-image --studio "Snipe a Slime!" --file ".\assets\shop.png" --to "StarterGui" --kind button --size 96x96
 rs import-ui-pack --studio "Snipe a Slime!" --folder ".\ui\shop" --to "StarterGui" --name "ShopGui"
-rs install-plugin
-rs doctor
 rs validate --studio "Snipe a Slime!" --path "Workspace.Crate" --fix
 rs repair-tool --studio "Snipe a Slime!" --path "Workspace.Rifle"
 rs smoke all --studio "Snipe a Slime!"
 rs smoke regression --studio "Snipe a Slime!" --out ".\smoke-regression.json" --upload-mock
-rs snapshot --studio "Snipe a Slime!" --path "Workspace" --format json
+rs import-uploaded audio rbxassetid://1234567890 --studio "Snipe a Slime!" --to SoundService --name Click
+```
+
+### Cloud Side Effect
+
+These commands call Roblox Open Cloud or rehost assets. Use a reviewed creator/profile and do not paste API keys into logs.
+
+```powershell
 rs auth profile add mygroup --creator-id 123456 --creator-type group --api-key $env:ROBLOX_API_KEY
 rs upload image ".\assets\shop.png" --profile mygroup --wait --import-to StarterGui --studio "Snipe a Slime!"
-rs import-uploaded audio rbxassetid://1234567890 --studio "Snipe a Slime!" --to SoundService --name Click
-rs diff --export ".\exports\old" --against-export ".\exports\new" --fix-plan --format json > ".\plan.json"
-rs apply-plan --studio "Snipe a Slime!" --root Workspace.Crate --file ".\plan.json" --dry-run --only added,modified --exclude Scripts
-rs sync pull --studio "Snipe a Slime!" --path "Workspace.Crate" --out ".\pulled\crate" --overwrite
-rs package --studio "Snipe a Slime!" --path "ServerStorage.SniperSkins" --out ".\packages\sniper-skins.rspkg"
-rs package verify --file ".\packages\sniper-skins.rspkg"
-rs package pack ".\packages\sniper-skins.rspkg" --out ".\packages\sniper-skins.rspkg.zip"
-rs package import --studio "Snipe a Slime!" --file ".\packages\sniper-skins.rspkg" --to ServerStorage --if-exists rename --dry-run
 rs package import --studio "Snipe a Slime!" --file ".\packages\sniper-skins.rspkg" --to ServerStorage --if-exists rename --rehost-images --profile mygroup
-rs package update --studio "Snipe a Slime!" --file ".\packages\sniper-skins.rspkg" --to ServerStorage --owned-only --dry-run
-rs deps --studio "Snipe a Slime!" --path "Workspace.Rifle"
-rs publish-check --studio "Snipe a Slime!" --path "Workspace.Rifle" --package ".\packages\sniper-skins.rspkg"
 rs transfer --from "Snipe for Brainrots!:StarterGui.ShopGui" --to "Snipe a Slime!:StarterGui" --rehost-images --profile mygroup
 ```
 
-The bridge auto-spawns on first CLI command and stays running until `rs bridge stop`.
+The bridge auto-spawns on first CLI command, waits up to 8 seconds for `/healthz`, and stays running until `rs bridge stop`.
 
 `export` writes one `instance.json` metadata file per Studio instance. Scripts are emitted as
 `.server.lua`, `.client.lua`, or `.module.lua`. Roblox-hosted meshes, textures, images,

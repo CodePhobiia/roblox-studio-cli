@@ -14,8 +14,31 @@ local function normalizeAssetId(value)
     return value
 end
 
-local function ensureImageContainer(parent, name)
+local function directChildWithSourceId(parent, sourceId)
+    if type(sourceId) ~= "string" or sourceId == "" then
+        return nil
+    end
+    for _, child in ipairs(parent:GetChildren()) do
+        local ok, childSourceId, managedBy = pcall(function()
+            return child:GetAttribute("rsSourceId"), child:GetAttribute("rsManagedBy")
+        end)
+        if ok and childSourceId == sourceId and managedBy == "rs" then
+            return child
+        end
+    end
+    return nil
+end
+
+local function ensureImageContainer(parent, name, sourceId)
     if parent:IsA("StarterGui") or parent:IsA("PlayerGui") then
+        local existing = directChildWithSourceId(parent, sourceId)
+        if existing and existing:IsA("ScreenGui") then
+            existing.Name = name .. "Gui"
+            existing.ResetOnSpawn = false
+            return existing, existing
+        elseif existing then
+            existing:Destroy()
+        end
         local gui = Instance.new("ScreenGui")
         gui.Name = name .. "Gui"
         gui.ResetOnSpawn = false
@@ -27,9 +50,17 @@ end
 
 local function importImage(payload, parent, assetId, sourceId)
     local name = StudioPath.sanitize(payload.name, "UploadedImage")
-    local container, root = ensureImageContainer(parent, name)
+    local container, root = ensureImageContainer(parent, name, sourceId)
     local uiKind = tostring(payload.uiKind or "image")
-    local object = uiKind == "button" and Instance.new("ImageButton") or Instance.new("ImageLabel")
+    local className = uiKind == "button" and "ImageButton" or "ImageLabel"
+    local object = directChildWithSourceId(container, sourceId)
+    if object and object.ClassName ~= className then
+        object:Destroy()
+        object = nil
+    end
+    if not object then
+        object = Instance.new(className)
+    end
     object.Name = name
     object.BackgroundTransparency = 1
     object.BorderSizePixel = 0
@@ -44,7 +75,12 @@ local function importImage(payload, parent, assetId, sourceId)
 end
 
 local function importAudio(payload, parent, assetId, sourceId)
-    local sound = Instance.new("Sound")
+    local sound = directChildWithSourceId(parent, sourceId)
+    if sound and not sound:IsA("Sound") then
+        sound:Destroy()
+        sound = nil
+    end
+    sound = sound or Instance.new("Sound")
     sound.Name = StudioPath.sanitize(payload.name, "UploadedSound")
     sound.SoundId = assetId
     if payload.volume ~= nil then

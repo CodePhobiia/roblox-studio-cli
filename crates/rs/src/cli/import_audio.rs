@@ -36,12 +36,24 @@ pub fn run(
     looped: bool,
     json: bool,
 ) -> AppResult<()> {
-    let (parent_path, sounds) = if let Some(manifest) = manifest {
+    let (parent_path, sounds, source_id) = if let Some(manifest) = manifest {
         let manifest_dir = manifest
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        let manifest: AudioManifest = serde_json::from_str(&std::fs::read_to_string(&manifest)?)?;
+        let manifest_text = std::fs::read_to_string(&manifest)?;
+        let source_id = crate::cli::import_uploaded::stable_source_id(
+            "audio-manifest",
+            &[
+                manifest
+                    .canonicalize()
+                    .unwrap_or_else(|_| manifest.clone())
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                format!("{:016x}", fnv1a64(manifest_text.as_bytes())),
+            ],
+        );
+        let manifest: AudioManifest = serde_json::from_str(&manifest_text)?;
         let parent_path = parent_path
             .or(manifest.to)
             .unwrap_or_else(|| "SoundService".to_string());
@@ -68,14 +80,14 @@ pub fn run(
                             .unwrap_or("Sound")
                             .to_string()
                     }),
-                    asset_id: sound.asset_id,
-                    volume: sound.volume,
-                    playback_speed: sound.playback_speed,
+                    asset_id: crate::cli::import_uploaded::normalize_asset_id(&sound.asset_id)?,
+                    volume: checked_volume(sound.volume)?,
+                    playback_speed: checked_playback_speed(sound.playback_speed)?,
                     looped: sound.looped,
                 })
             })
             .collect::<AppResult<Vec<_>>>()?;
-        (parent_path, sounds)
+        (parent_path, sounds, source_id)
     } else {
         let file =
             file.ok_or_else(|| AppError::Other("--file or --manifest is required".into()))?;
@@ -88,6 +100,9 @@ pub fn run(
         let asset_id = asset_id.ok_or_else(|| {
             AppError::Other("--asset-id is required for local audio files; rs does not fake local SoundId imports".into())
         })?;
+        let asset_id = crate::cli::import_uploaded::normalize_asset_id(&asset_id)?;
+        let volume = checked_volume(volume)?;
+        let playback_speed = checked_playback_speed(playback_speed)?;
         let name = name.unwrap_or_else(|| {
             file.file_stem()
                 .and_then(|value| value.to_str())
@@ -98,11 +113,18 @@ pub fn run(
             parent_path.unwrap_or_else(|| "SoundService".to_string()),
             vec![ImportAudioSound {
                 name,
-                asset_id,
+                asset_id: asset_id.clone(),
                 volume,
                 playback_speed,
                 looped,
             }],
+            crate::cli::import_uploaded::stable_source_id(
+                "audio-file",
+                &[
+                    crate::cli::import_uploaded::stable_file_source_id("audio-file-source", &file)?,
+                    asset_id,
+                ],
+            ),
         )
     };
 
@@ -114,7 +136,7 @@ pub fn run(
             studio,
             parent_path,
             sounds,
-            source_id: None,
+            source_id: Some(source_id),
         },
         75,
     )?;
@@ -136,4 +158,37 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+fn checked_volume(volume: Option<f32>) -> AppResult<Option<f32>> {
+    crate::cli::import_uploaded::validate_sound_options(volume, None)?;
+    Ok(volume)
+}
+
+fn checked_playback_speed(playback_speed: Option<f32>) -> AppResult<Option<f32>> {
+    crate::cli::import_uploaded::validate_sound_options(None, playback_speed)?;
+    Ok(playback_speed)
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{checked_playback_speed, checked_volume};
+
+    #[test]
+    fn rejects_invalid_audio_ranges_before_studio() {
+        assert!(checked_volume(Some(-0.1)).is_err());
+        assert!(checked_volume(Some(10.1)).is_err());
+        assert!(checked_volume(Some(f32::INFINITY)).is_err());
+        assert!(checked_playback_speed(Some(0.0)).is_err());
+        assert!(checked_playback_speed(Some(f32::NAN)).is_err());
+    }
 }

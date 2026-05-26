@@ -67,16 +67,25 @@ local function findMatchingChild(targetParent, incoming)
     return targetParent:FindFirstChild(incoming.Name)
 end
 
+local function recordPath(list, path)
+    if type(path) == "string" and path ~= "" then
+        table.insert(list, path)
+    end
+end
+
 local function mergeChildren(target, incoming, options, result)
     for _, child in ipairs(incoming:GetChildren()) do
         local existing = findMatchingChild(target, child)
         if not existing then
             result.created += 1
-            table.insert(result.changedPaths, target:GetFullName() .. "." .. child.Name)
+            local createdPath = target:GetFullName() .. "." .. child.Name
+            recordPath(result.changedPaths, createdPath)
+            recordPath(result.createdPaths, createdPath)
             if not options.dryRun then
                 child.Parent = target
             end
         else
+            local existingPath = existing:GetFullName()
             local canMutate, mutateErr = Ownership.canMutate(existing, {
                 force = options.force,
                 packageId = options.packageId,
@@ -85,12 +94,15 @@ local function mergeChildren(target, incoming, options, result)
             if not canMutate then
                 if options.mode == "preserve-local" then
                     result.preserved += 1
+                    recordPath(result.preservedPaths, existingPath)
                     table.insert(result.warnings, mutateErr)
                     if not options.dryRun then
                         child:Destroy()
                     end
                 else
                     result.refused += 1
+                    recordPath(result.refusedPaths, existingPath)
+                    recordPath(result.unownedPaths, existingPath)
                     table.insert(result.warnings, mutateErr)
                     if not options.dryRun then
                         child:Destroy()
@@ -99,12 +111,14 @@ local function mergeChildren(target, incoming, options, result)
             elseif options.mode == "preserve-local" then
                 mergeChildren(existing, child, options, result)
                 result.preserved += 1
+                recordPath(result.preservedPaths, existingPath)
                 if not options.dryRun then
                     child:Destroy()
                 end
             else
                 result.replaced += 1
-                table.insert(result.changedPaths, existing:GetFullName())
+                recordPath(result.changedPaths, existingPath)
+                recordPath(result.replacedPaths, existingPath)
                 if not options.dryRun then
                     local parent = existing.Parent
                     existing:Destroy()
@@ -150,15 +164,15 @@ local function packageUpdateHandler(payload)
         preserved = 0,
         refused = 0,
         changedPaths = {},
+        createdPaths = {},
+        replacedPaths = {},
+        preservedPaths = {},
+        refusedPaths = {},
+        unownedPaths = {},
+        rollbackAvailable = existing ~= nil,
+        snapshotRecorded = false,
         warnings = {}
     }
-
-    if dryRun and mode == "conflict-report" then
-        if existing and not result.owned and payload.force ~= true then
-            table.insert(result.warnings, "existing install is not owned by rs/package: " .. existing:GetFullName())
-        end
-        return { ok = true, data = result }
-    end
 
     local temp = tempParent()
     local imported, warningsOrErr, idMap = Deserializer.deserialize(payload.blob, temp)
@@ -171,9 +185,11 @@ local function packageUpdateHandler(payload)
         table.insert(result.warnings, warning)
     end
 
+    local rootRefused = false
     if existing and not dryRun then
         result.snapshotBefore = Serializer.serialize(existing)
         result.restoreParentPath = parent:GetFullName()
+        result.snapshotRecorded = true
     end
 
     if existing then
@@ -183,22 +199,28 @@ local function packageUpdateHandler(payload)
             sourceId = rootSourceId
         })
         if not canMutate and mode ~= "preserve-local" then
+            rootRefused = true
             result.refused += 1
+            recordPath(result.refusedPaths, existing:GetFullName())
+            recordPath(result.unownedPaths, existing:GetFullName())
             table.insert(result.warnings, mutateErr)
         end
     end
 
-    if result.refused == 0 then
+    if result.refused == 0 or (dryRun and not (rootRefused and mode == "replace-owned")) then
         if not existing then
             result.created += 1
-            table.insert(result.changedPaths, parent:GetFullName() .. "." .. imported.Name)
+            local createdPath = parent:GetFullName() .. "." .. imported.Name
+            recordPath(result.changedPaths, createdPath)
+            recordPath(result.createdPaths, createdPath)
             if not dryRun then
                 imported.Parent = parent
             end
             result.rootPath = parent:GetFullName() .. "." .. imported.Name
         elseif mode == "replace-owned" then
             result.replaced += 1
-            table.insert(result.changedPaths, existing:GetFullName())
+            recordPath(result.changedPaths, existing:GetFullName())
+            recordPath(result.replacedPaths, existing:GetFullName())
             if not dryRun then
                 existing:Destroy()
                 imported.Parent = parent

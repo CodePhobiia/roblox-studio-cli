@@ -68,6 +68,28 @@ impl UploadSummary {
     pub(crate) fn asset_uri(&self) -> Option<&str> {
         self.asset_uri.as_deref()
     }
+
+    pub(crate) fn operation_id(&self) -> Option<&str> {
+        self.operation_path.as_deref()
+    }
+
+    pub(crate) fn operation_status(&self) -> Option<String> {
+        if let Some(operation) = &self.operation {
+            if operation_failure(operation).is_some() {
+                return Some("failed".into());
+            }
+            if operation.get("done").and_then(Value::as_bool) == Some(true) {
+                return Some("done".into());
+            }
+        }
+        if self.asset_id.is_some() {
+            Some("done".into())
+        } else if self.operation_path.is_some() {
+            Some("pending".into())
+        } else {
+            None
+        }
+    }
 }
 
 pub fn run(options: UploadOptions) -> AppResult<()> {
@@ -309,7 +331,7 @@ fn upload_bytes_to_open_cloud(
     if !status.is_success() {
         return Err(AppError::Other(format!(
             "Open Cloud asset upload failed with HTTP {status}: {}",
-            serde_json::to_string(&value)?
+            redacted_json_string_with_secrets(&value, &[api_key])?
         )));
     }
 
@@ -359,22 +381,17 @@ fn wait_for_upload(
         if !status.is_success() {
             return Err(AppError::Other(format!(
                 "Open Cloud operation poll failed with HTTP {status}: {}",
-                serde_json::to_string(&value)?
+                redacted_json_string_with_secrets(&value, &[api_key.as_str()])?
             )));
         }
         if value.get("done").and_then(Value::as_bool) == Some(true) {
-            if let Some(status) = value.get("status") {
+            if let Some(status) = operation_failure(&value) {
                 return Err(AppError::Other(format!(
                     "Open Cloud upload operation failed: {}",
-                    serde_json::to_string(status)?
+                    redacted_json_string_with_secrets(&status, &[api_key.as_str()])?
                 )));
             }
-            let asset_id = extract_asset_id(&value).or_else(|| extract_asset_id(&summary.response));
-            summary.asset_uri = asset_id
-                .as_ref()
-                .map(|asset_id| format!("rbxassetid://{asset_id}"));
-            summary.asset_id = asset_id;
-            summary.operation = Some(value);
+            apply_completed_operation(summary, value)?;
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -384,6 +401,86 @@ fn wait_for_upload(
         }
         std::thread::sleep(Duration::from_secs(2));
     }
+}
+
+fn apply_completed_operation(summary: &mut UploadSummary, value: Value) -> AppResult<()> {
+    let asset_id = extract_asset_id(&value).or_else(|| extract_asset_id(&summary.response));
+    if asset_id.is_none() {
+        return Err(AppError::Other(format!(
+            "Open Cloud upload operation completed without an asset id: {}",
+            redacted_json_string(&value)?
+        )));
+    }
+    summary.asset_uri = asset_id
+        .as_ref()
+        .map(|asset_id| format!("rbxassetid://{asset_id}"));
+    summary.asset_id = asset_id;
+    summary.operation = Some(value);
+    Ok(())
+}
+
+fn operation_failure(value: &Value) -> Option<Value> {
+    if let Some(error) = value.get("error") {
+        return Some(error.clone());
+    }
+    if let Some(status) = value.get("status") {
+        return Some(status.clone());
+    }
+    None
+}
+
+fn redacted_json_string(value: &Value) -> AppResult<String> {
+    redacted_json_string_with_secrets(value, &[])
+}
+
+fn redacted_json_string_with_secrets(value: &Value, secrets: &[&str]) -> AppResult<String> {
+    let mut text = serde_json::to_string(&redact_json(value))?;
+    for secret in secrets {
+        if !secret.is_empty() {
+            text = text.replace(secret, "<redacted>");
+        }
+    }
+    Ok(text)
+}
+
+fn redact_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut redacted = serde_json::Map::new();
+            for (key, value) in map {
+                if is_sensitive_key(key) {
+                    redacted.insert(key.clone(), Value::String("<redacted>".into()));
+                } else {
+                    redacted.insert(key.clone(), redact_json(value));
+                }
+            }
+            Value::Object(redacted)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact_json).collect()),
+        Value::String(text) if looks_sensitive_value(text) => Value::String("<redacted>".into()),
+        _ => value.clone(),
+    }
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("api_key")
+        || key.contains("apikey")
+        || key.contains("token")
+        || key.contains("secret")
+        || key.contains("authorization")
+        || key.contains("x-api-key")
+}
+
+fn looks_sensitive_value(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("roblox_api_key=")
+        || lower.contains("x-api-key")
+        || lower.contains("authorization:")
+        || lower.contains("bearer ")
+        || lower.contains("api_key=")
+        || lower.contains("apikey=")
+        || lower.contains("token=")
 }
 
 fn api_key_from_options(options: &UploadOptions) -> AppResult<String> {
@@ -550,7 +647,11 @@ fn print_summary(summary: &UploadSummary) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_request, extract_asset_id, mime_type, UploadKind};
+    use super::{
+        apply_completed_operation, build_request, extract_asset_id, mime_type, operation_failure,
+        redacted_json_string, redacted_json_string_with_secrets, UploadKind, UploadSummary,
+    };
+    use serde_json::json;
     use std::path::Path;
 
     #[test]
@@ -590,10 +691,65 @@ mod tests {
 
     #[test]
     fn extracts_asset_id_from_done_operation() {
-        let value = serde_json::json!({
+        let value = json!({
             "done": true,
             "response": { "assetId": "2205400862" }
         });
         assert_eq!(extract_asset_id(&value).as_deref(), Some("2205400862"));
+    }
+
+    #[test]
+    fn completed_operation_requires_asset_id() {
+        let mut summary = UploadSummary {
+            asset_type: "Image",
+            file: "icon.png".into(),
+            creator_id: 1,
+            creator_type: "group".into(),
+            response: json!({ "path": "operations/upload" }),
+            operation_path: Some("operations/upload".into()),
+            operation: None,
+            asset_id: None,
+            asset_uri: None,
+        };
+        let err = apply_completed_operation(&mut summary, json!({ "done": true })).unwrap_err();
+        assert!(err.to_string().contains("without an asset id"));
+    }
+
+    #[test]
+    fn parses_operation_failure_bodies() {
+        let failure = json!({
+            "done": true,
+            "error": {
+                "code": "PERMISSION_DENIED",
+                "message": "creator cannot upload this asset"
+            }
+        });
+        assert_eq!(
+            operation_failure(&failure).unwrap()["code"],
+            "PERMISSION_DENIED"
+        );
+    }
+
+    #[test]
+    fn redacts_secretish_upload_errors() {
+        let body = json!({
+            "apiKey": "secret-profile-key",
+            "message": "ROBLOX_API_KEY=secret-profile-key failed",
+            "safe": "permission denied"
+        });
+        let text = redacted_json_string(&body).unwrap();
+        assert!(!text.contains("secret-profile-key"));
+        assert!(text.contains("<redacted>"));
+        assert!(text.contains("permission denied"));
+    }
+
+    #[test]
+    fn redacts_known_api_key_echoes_without_secretish_field_names() {
+        let body = json!({
+            "message": "request used plain-secret-value"
+        });
+        let text = redacted_json_string_with_secrets(&body, &["plain-secret-value"]).unwrap();
+        assert!(!text.contains("plain-secret-value"));
+        assert!(text.contains("<redacted>"));
     }
 }

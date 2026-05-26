@@ -1,17 +1,6 @@
 local Inspector = {}
-
-local ASSET_PROPERTIES = {
-    AnimationId = "animation",
-    BottomImage = "image",
-    Image = "image",
-    MidImage = "image",
-    MeshId = "mesh",
-    SoundId = "audio",
-    TopImage = "image",
-    Texture = "image",
-    TextureID = "image",
-    TextureId = "image"
-}
+local Diagnostics = require(script.Parent.Diagnostics)
+local Fixes = Diagnostics.Fixes
 
 local REF_PROPERTIES = {
     Weld = { "Part0", "Part1" },
@@ -123,7 +112,7 @@ local function validateReferences(root, out)
                     if property == "Part0" or property == "Part1" or property == "Attachment0" or property == "Attachment1" then
                         severity = "fail"
                     end
-                    addDiagnostic(out, severity, "ref.missing", instance, property, property .. " is nil", "repair-tool")
+                    addDiagnostic(out, severity, "ref.missing", instance, property, property .. " is nil", nil)
                 elseif typeof(value) == "Instance" and not isInside(value, root) then
                     addDiagnostic(out, "warn", "ref.external", instance, property, property .. " points outside the validated subtree", nil)
                 end
@@ -152,6 +141,16 @@ local function rigidJointParts(joint)
         return p0, p1
     end
     return nil, nil
+end
+
+local function allToolJoints(tool)
+    local joints = {}
+    for _, descendant in ipairs(tool:GetDescendants()) do
+        if RIGID_JOINT_CLASSES[descendant.ClassName] then
+            table.insert(joints, descendant)
+        end
+    end
+    return joints
 end
 
 local function connectedToHandle(tool, handle, parts)
@@ -192,7 +191,7 @@ local function validateTool(tool, out)
             requiresHandle = tool.RequiresHandle
         end)
         if requiresHandle then
-            addDiagnostic(out, "fail", "tool.handle.missing", tool, "Handle", "Tool requires a BasePart child named Handle", "repair-tool")
+            addDiagnostic(out, "fail", "tool.handle.missing", tool, "Handle", "Tool requires a BasePart child named Handle", nil)
         else
             addDiagnostic(out, "info", "tool.handle.optional", tool, "Handle", "Tool has RequiresHandle=false and no Handle", nil)
         end
@@ -206,7 +205,14 @@ local function validateTool(tool, out)
         end
     end
     if duplicateHandles > 1 then
-        addDiagnostic(out, "warn", "tool.handle.ambiguous", tool, "Handle", "Tool has multiple direct children named Handle", "repair-tool")
+        addDiagnostic(out, "warn", "tool.handle.ambiguous", tool, "Handle", "Tool has multiple direct children named Handle", nil)
+    end
+
+    for _, joint in ipairs(allToolJoints(tool)) do
+        local p0, p1 = rigidJointParts(joint)
+        if not p0 or not p1 then
+            addDiagnostic(out, "fail", "tool.joint.broken", joint, nil, "Rigid joint has missing or invalid Part0/Part1", Fixes.TOOL_REMOVE_BROKEN_JOINTS)
+        end
     end
 
     local parts = collectBaseParts(tool)
@@ -217,10 +223,19 @@ local function validateTool(tool, out)
             anchored = part.Anchored
         end)
         if anchored then
-            addDiagnostic(out, "fail", "tool.part.anchored", part, "Anchored", "Tool BasePart is anchored", "repair-tool")
+            addDiagnostic(out, "fail", "tool.part.anchored", part, "Anchored", "Tool BasePart is anchored", Fixes.TOOL_UNANCHOR_PARTS)
+        end
+        if part ~= handle then
+            local canCollide = false
+            pcall(function()
+                canCollide = part.CanCollide
+            end)
+            if canCollide then
+                addDiagnostic(out, "warn", "tool.part.collision", part, "CanCollide", "Tool non-handle BasePart collides by default", Fixes.TOOL_SET_PART_PHYSICS)
+            end
         end
         if part ~= handle and not connected[part] then
-            addDiagnostic(out, "fail", "tool.part.disconnected", part, nil, "BasePart is not rigidly connected to Handle", "repair-tool")
+            addDiagnostic(out, "fail", "tool.part.disconnected", part, nil, "BasePart is not rigidly connected to Handle", Fixes.TOOL_WELD_DISCONNECTED_PARTS)
         end
     end
     addDiagnostic(out, "info", "tool.parts", tool, nil, "Tool contains " .. tostring(#parts) .. " BasePart descendant(s)", nil)
@@ -236,21 +251,48 @@ end
 
 local function validateAssets(root, out)
     for _, instance in ipairs(descendantsInclusive(root)) do
-        if instance:IsA("MeshPart") then
-            local meshId = readProperty(instance, "MeshId")
-            if type(meshId) ~= "string" or meshId == "" then
-                addDiagnostic(out, "warn", "asset.mesh.missing", instance, "MeshId", "MeshPart has an empty MeshId", nil)
+        local props = Diagnostics.assetPropertiesFor(instance)
+        if props then
+            local presentAssetCount = 0
+            for property, meta in pairs(props) do
+                local value, err = readProperty(instance, property)
+                if err then
+                    if meta.optionalProperty ~= true then
+                        table.insert(out.warnings, fullName(instance) .. "." .. property .. ": " .. err)
+                    end
+                else
+                    local present = false
+                    if type(value) == "string" then
+                        present = value ~= ""
+                    elseif value ~= nil then
+                        present = tostring(value) ~= ""
+                    end
+                    if not present and meta.fallbackProperties then
+                        for _, fallbackProperty in ipairs(meta.fallbackProperties) do
+                            local fallback = readProperty(instance, fallbackProperty)
+                            if fallback ~= nil and tostring(fallback) ~= "" then
+                                present = true
+                                break
+                            end
+                        end
+                    end
+                    if present then
+                        presentAssetCount += 1
+                    elseif meta.validateWhenMissing ~= false then
+                        addDiagnostic(
+                            out,
+                            "warn",
+                            Diagnostics.missingAssetRule(meta.kind),
+                            instance,
+                            property,
+                            instance.ClassName .. "." .. property .. " is empty",
+                            nil
+                        )
+                    end
+                end
             end
-        elseif instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
-            local image = readProperty(instance, "Image")
-            local imageContent = readProperty(instance, "ImageContent")
-            if (type(image) ~= "string" or image == "") and imageContent == nil then
-                addDiagnostic(out, "warn", "asset.image.missing", instance, "Image", "Image object has no Image or ImageContent", nil)
-            end
-        elseif instance:IsA("Sound") then
-            local soundId = readProperty(instance, "SoundId")
-            if type(soundId) ~= "string" or soundId == "" then
-                addDiagnostic(out, "warn", "asset.sound.missing", instance, "SoundId", "Sound has an empty SoundId", nil)
+            if instance.ClassName == "SurfaceAppearance" and presentAssetCount == 0 then
+                addDiagnostic(out, "warn", "asset.image.missing", instance, nil, "SurfaceAppearance has no texture maps", nil)
             end
         end
     end
@@ -343,15 +385,18 @@ function Inspector.snapshot(root, includePaths)
             remoteCount += 1
         end
 
-        for property, kind in pairs(ASSET_PROPERTIES) do
-            local assetUri = maybeAsset(instance, property)
-            if assetUri then
-                table.insert(assetRefs, {
-                    path = fullName(instance),
-                    property = property,
-                    assetUri = assetUri,
-                    assetKind = kind
-                })
+        local props = Diagnostics.assetPropertiesFor(instance)
+        if props then
+            for property, meta in pairs(props) do
+                local assetUri = maybeAsset(instance, property)
+                if assetUri then
+                    table.insert(assetRefs, {
+                        path = fullName(instance),
+                        property = property,
+                        assetUri = assetUri,
+                        assetKind = meta.kind
+                    })
+                end
             end
         end
 
@@ -405,16 +450,6 @@ function Inspector.snapshot(root, includePaths)
     }
 end
 
-local function allToolJoints(tool)
-    local joints = {}
-    for _, descendant in ipairs(tool:GetDescendants()) do
-        if RIGID_JOINT_CLASSES[descendant.ClassName] then
-            table.insert(joints, descendant)
-        end
-    end
-    return joints
-end
-
 function Inspector.repairTool(tool, options)
     options = options or {}
     local dryRun = options.dryRun == true
@@ -428,6 +463,8 @@ function Inspector.repairTool(tool, options)
     local result = {
         path = fullName(tool),
         dryRun = dryRun,
+        fixIds = {},
+        changedPaths = {},
         partsFound = #parts,
         validJointsPreserved = 0,
         brokenJointsFound = 0,
@@ -435,6 +472,16 @@ function Inspector.repairTool(tool, options)
         physicsPropertiesChanged = 0,
         warnings = {}
     }
+    local seenFixes = {}
+    local function recordFix(fixId, instance)
+        if fixId and not seenFixes[fixId] then
+            seenFixes[fixId] = true
+            table.insert(result.fixIds, fixId)
+        end
+        if instance then
+            table.insert(result.changedPaths, fullName(instance))
+        end
+    end
 
     for _, joint in ipairs(allToolJoints(tool)) do
         local p0, p1 = rigidJointParts(joint)
@@ -442,8 +489,11 @@ function Inspector.repairTool(tool, options)
             result.validJointsPreserved += 1
         else
             result.brokenJointsFound += 1
-            if options.replaceBroken == true and not dryRun then
-                joint:Destroy()
+            if options.replaceBroken == true then
+                recordFix(Fixes.TOOL_REMOVE_BROKEN_JOINTS, joint)
+                if not dryRun then
+                    joint:Destroy()
+                end
             end
         end
     end
@@ -452,6 +502,7 @@ function Inspector.repairTool(tool, options)
     for _, part in ipairs(parts) do
         if part ~= handle and not connected[part] then
             result.weldsCreated += 1
+            recordFix(Fixes.TOOL_WELD_DISCONNECTED_PARTS, part)
             if not dryRun then
                 local weld = Instance.new("WeldConstraint")
                 weld.Name = "rs_HandleWeld_" .. part.Name
@@ -465,6 +516,7 @@ function Inspector.repairTool(tool, options)
             local changed = false
             if part.Anchored ~= false then
                 changed = true
+                recordFix(Fixes.TOOL_UNANCHOR_PARTS, part)
                 if not dryRun then
                     part.Anchored = false
                 end
@@ -476,12 +528,14 @@ function Inspector.repairTool(tool, options)
                 end
                 if part.CanCollide ~= desiredCollision then
                     changed = true
+                    recordFix(Fixes.TOOL_SET_PART_PHYSICS, part)
                     if not dryRun then
                         part.CanCollide = desiredCollision
                     end
                 end
                 if options.massless ~= nil and part.Massless ~= options.massless then
                     changed = true
+                    recordFix(Fixes.TOOL_SET_PART_PHYSICS, part)
                     if not dryRun then
                         part.Massless = options.massless
                     end

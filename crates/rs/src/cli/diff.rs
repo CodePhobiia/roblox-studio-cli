@@ -34,6 +34,12 @@ struct FixPlanOperation {
     path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     property: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    class_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    before: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after: Option<Value>,
     reason: String,
 }
 
@@ -49,6 +55,7 @@ struct Node {
 struct Tree {
     nodes: BTreeMap<String, Node>,
     duplicate_names: Vec<SnapshotDuplicateName>,
+    identity_conflicts: Vec<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -126,24 +133,54 @@ pub fn run(
 fn build_fix_plan(changes: Vec<DiffChange>, left: &Tree, right: &Tree) -> FixPlan {
     let mut operations = Vec::new();
     let mut conflicts = Vec::new();
+    let (rename_or_move_conflicts, rename_or_move_paths) =
+        detect_rename_or_move_conflicts(&changes, left, right);
+    conflicts.extend(rename_or_move_conflicts);
     for change in &changes {
         match change.kind.as_str() {
+            "added" if rename_or_move_paths.contains(&change.path) => {}
             "added" => operations.push(FixPlanOperation {
                 action: "create".into(),
                 path: change.path.clone(),
                 property: None,
+                class_name: change
+                    .after
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                before: change.before.clone(),
+                after: change.after.clone(),
                 reason: "right side has an instance missing from the left side".into(),
             }),
+            "deleted" if rename_or_move_paths.contains(&change.path) => {}
             "deleted" => operations.push(FixPlanOperation {
                 action: "delete".into(),
                 path: change.path.clone(),
                 property: None,
+                class_name: change
+                    .before
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                before: change.before.clone(),
+                after: change.after.clone(),
                 reason: "left side has an instance missing from the right side".into(),
             }),
+            "modified" if change.property.as_deref() == Some("ClassName") => {
+                conflicts.push(format!(
+                    "class change at {} from {} to {} is unsupported by apply-plan",
+                    change.path,
+                    value_label(change.before.as_ref()),
+                    value_label(change.after.as_ref())
+                ));
+            }
             "modified" | "reference" => operations.push(FixPlanOperation {
                 action: "set-property".into(),
                 path: change.path.clone(),
                 property: change.property.clone(),
+                class_name: None,
+                before: change.before.clone(),
+                after: change.after.clone(),
                 reason: if change.kind == "reference" {
                     "object reference topology differs".into()
                 } else {
@@ -163,6 +200,8 @@ fn build_fix_plan(changes: Vec<DiffChange>, left: &Tree, right: &Tree) -> FixPla
             duplicate.name, duplicate.parent_path
         ));
     }
+    conflicts.extend(left.identity_conflicts.iter().cloned());
+    conflicts.extend(right.identity_conflicts.iter().cloned());
     FixPlan {
         safe_to_apply: conflicts.is_empty(),
         operations,
@@ -209,6 +248,7 @@ fn tree_from_read(value: Value) -> AppResult<Tree> {
     Ok(Tree {
         nodes,
         duplicate_names,
+        identity_conflicts: Vec::new(),
     })
 }
 
@@ -280,35 +320,44 @@ fn load_export(path: &Path) -> AppResult<Tree> {
     })?;
     let mut nodes = BTreeMap::new();
     let mut duplicate_names = Vec::new();
+    let mut identity_conflicts = Vec::new();
     for file in collect_instance_json(path)? {
         let value: Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
         let full_path = value
             .get("fullPath")
             .and_then(Value::as_str)
             .unwrap_or(&root_path);
-        nodes.insert(
-            relative_key(&root_path, full_path),
-            Node {
-                class_name: value
-                    .get("className")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                properties: object_map(value.get("properties")),
-                attributes: object_map(value.get("attributes")),
-                tags: value
-                    .get("tags")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(ToOwned::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            },
-        );
+        let key = relative_key(&root_path, full_path);
+        let node = Node {
+            class_name: value
+                .get("className")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            properties: object_map(value.get("properties")),
+            attributes: object_map(value.get("attributes")),
+            tags: value
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        if nodes.contains_key(&key) {
+            identity_conflicts.push(format!(
+                "duplicate exported fullPath '{}' maps to '{}' at {}; keeping the first entry",
+                full_path,
+                key,
+                file.display()
+            ));
+            continue;
+        }
+        nodes.insert(key, node);
     }
     for duplicate in detect_duplicate_export_names(&nodes) {
         duplicate_names.push(duplicate);
@@ -316,6 +365,7 @@ fn load_export(path: &Path) -> AppResult<Tree> {
     Ok(Tree {
         nodes,
         duplicate_names,
+        identity_conflicts,
     })
 }
 
@@ -508,6 +558,66 @@ fn object_map(value: Option<&Value>) -> BTreeMap<String, Value> {
         .unwrap_or_default()
 }
 
+fn value_label(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn node_signature(node: &Node) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "className": &node.class_name,
+        "properties": &node.properties,
+        "attributes": &node.attributes,
+        "tags": &node.tags
+    }))
+    .unwrap_or_else(|_| node.class_name.clone())
+}
+
+fn detect_rename_or_move_conflicts(
+    changes: &[DiffChange],
+    left: &Tree,
+    right: &Tree,
+) -> (Vec<String>, BTreeSet<String>) {
+    let mut added_by_signature = BTreeMap::<String, Vec<String>>::new();
+    let mut deleted = Vec::<(String, String)>::new();
+    for change in changes {
+        match change.kind.as_str() {
+            "added" => {
+                if let Some(node) = right.nodes.get(&change.path) {
+                    added_by_signature
+                        .entry(node_signature(node))
+                        .or_default()
+                        .push(change.path.clone());
+                }
+            }
+            "deleted" => {
+                if let Some(node) = left.nodes.get(&change.path) {
+                    deleted.push((change.path.clone(), node_signature(node)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut conflicts = Vec::new();
+    let mut conflict_paths = BTreeSet::new();
+    for (deleted_path, signature) in deleted {
+        if let Some(added_paths) = added_by_signature.get(&signature) {
+            for added_path in added_paths {
+                conflicts.push(format!(
+                    "possible rename or move from {} to {} is unsupported by apply-plan",
+                    deleted_path, added_path
+                ));
+                conflict_paths.insert(deleted_path.clone());
+                conflict_paths.insert(added_path.clone());
+            }
+        }
+    }
+    (conflicts, conflict_paths)
+}
+
 fn relative_key(root_path: &str, full_path: &str) -> String {
     if full_path == root_path {
         ".".to_string()
@@ -553,7 +663,11 @@ fn detect_duplicate_export_names(nodes: &BTreeMap<String, Node>) -> Vec<Snapshot
 
 #[cfg(test)]
 mod tests {
-    use super::relative_key;
+    use super::{build_fix_plan, diff_trees, load_export, relative_key, Node, Tree};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn relative_key_strips_root() {
@@ -562,5 +676,86 @@ mod tests {
             relative_key("Workspace.Tool", "Workspace.Tool.Handle"),
             "Handle"
         );
+    }
+
+    #[test]
+    fn fix_plan_marks_class_changes_as_conflicts() {
+        let left = tree_with_nodes([(".", node("Part"))]);
+        let right = tree_with_nodes([(".", node("Model"))]);
+        let changes = diff_trees(&left, &right, false, false);
+        let plan = build_fix_plan(changes, &left, &right);
+        assert!(!plan.safe_to_apply);
+        assert!(plan.operations.is_empty());
+        assert!(plan
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.contains("class change")));
+    }
+
+    #[test]
+    fn fix_plan_marks_possible_renames_as_conflicts() {
+        let left = tree_with_nodes([(".", node("Folder")), ("Old", node("Part"))]);
+        let right = tree_with_nodes([(".", node("Folder")), ("New", node("Part"))]);
+        let changes = diff_trees(&left, &right, false, false);
+        let plan = build_fix_plan(changes, &left, &right);
+        assert!(!plan.safe_to_apply);
+        assert!(plan.operations.is_empty());
+        assert!(plan
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.contains("possible rename or move")));
+    }
+
+    #[test]
+    fn export_loader_reports_duplicate_full_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "rs-diff-export-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("A")).unwrap();
+        fs::create_dir_all(root.join("B")).unwrap();
+        fs::write(
+            root.join("export_manifest.json"),
+            r#"{"rootPath":"Workspace.Root"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("A").join("instance.json"),
+            r#"{"fullPath":"Workspace.Root.Child","className":"Part"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("B").join("instance.json"),
+            r#"{"fullPath":"Workspace.Root.Child","className":"Part"}"#,
+        )
+        .unwrap();
+
+        let tree = load_export(&root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(tree.nodes.len(), 1);
+        assert_eq!(tree.identity_conflicts.len(), 1);
+    }
+
+    fn tree_with_nodes<const N: usize>(items: [(&str, Node); N]) -> Tree {
+        Tree {
+            nodes: items
+                .into_iter()
+                .map(|(path, node)| (path.to_string(), node))
+                .collect(),
+            duplicate_names: Vec::new(),
+            identity_conflicts: Vec::new(),
+        }
+    }
+
+    fn node(class_name: &str) -> Node {
+        Node {
+            class_name: class_name.to_string(),
+            properties: BTreeMap::from([("Size".to_string(), json!("1,1,1"))]),
+            attributes: BTreeMap::new(),
+            tags: Vec::new(),
+        }
     }
 }

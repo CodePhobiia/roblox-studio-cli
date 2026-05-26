@@ -113,6 +113,21 @@ local function resolveContainer(parent, name)
     return nil, nil, "parent must be StarterGui, PlayerGui, ScreenGui, SurfaceGui, BillboardGui, or a GuiObject"
 end
 
+local function directChildWithSourceId(parent, sourceId)
+    if type(sourceId) ~= "string" or sourceId == "" then
+        return nil
+    end
+    for _, child in ipairs(parent:GetChildren()) do
+        local ok, childSourceId, managedBy = pcall(function()
+            return child:GetAttribute("rsSourceId"), child:GetAttribute("rsManagedBy")
+        end)
+        if ok and childSourceId == sourceId and managedBy == "rs" then
+            return child
+        end
+    end
+    return nil
+end
+
 local function createImageObject(kind)
     if kind == "button" then
         local button = Instance.new("ImageButton")
@@ -154,6 +169,7 @@ function ImportImage.import(payload, parent)
 
     local name = sanitize(payload.name)
     local sourceId = Ownership.sourceId(payload, "image")
+    local existingManaged = directChildWithSourceId(parent, sourceId)
     local container, guiRoot, containerErr = resolveContainer(parent, name)
     if not container then
         return nil, containerErr
@@ -190,6 +206,9 @@ function ImportImage.import(payload, parent)
         return nil, "ImageContent assignment failed: " .. tostring(contentErr)
     end
 
+    if existingManaged and existingManaged ~= guiRoot and existingManaged ~= imageObject then
+        existingManaged:Destroy()
+    end
     imageObject.Parent = container
     Ownership.stamp(guiRoot, sourceId)
     Ownership.stamp(imageObject, sourceId)

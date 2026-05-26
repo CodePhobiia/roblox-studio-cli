@@ -41,8 +41,20 @@ pub fn run(
         load_pack_inputs(folder, manifest, to, name, kind)?;
     let mut elements = Vec::with_capacity(element_specs.len());
     let mut warnings = Vec::<String>::new();
+    let mut source_parts = vec![
+        root.canonicalize()
+            .unwrap_or_else(|_| root.clone())
+            .to_string_lossy()
+            .replace('\\', "/"),
+        request_name.clone(),
+    ];
     for spec in element_specs {
         let path = root.join(&spec.file);
+        source_parts.push(format!(
+            "{}:{}",
+            spec.file.to_string_lossy().replace('\\', "/"),
+            crate::cli::import_uploaded::file_content_hash(&path)?
+        ));
         let image = crate::cli::import_image::load_png(&path)?;
         warnings.extend(image.warnings.clone());
         let element_name = spec
@@ -88,7 +100,10 @@ pub fn run(
             parent_path,
             name: request_name,
             elements,
-            source_id: None,
+            source_id: Some(crate::cli::import_uploaded::stable_source_id(
+                "ui-pack",
+                &source_parts,
+            )),
         },
         210,
     )?;

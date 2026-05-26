@@ -14,6 +14,21 @@ local function normalizeAssetId(value)
     return value
 end
 
+local function directChildWithSourceId(parent, sourceId)
+    if type(sourceId) ~= "string" or sourceId == "" then
+        return nil
+    end
+    for _, child in ipairs(parent:GetChildren()) do
+        local ok, childSourceId, managedBy = pcall(function()
+            return child:GetAttribute("rsSourceId"), child:GetAttribute("rsManagedBy")
+        end)
+        if ok and childSourceId == sourceId and managedBy == "rs" then
+            return child
+        end
+    end
+    return nil
+end
+
 local function importAudioHandler(payload)
     if type(payload.parentPath) ~= "string" then
         return { ok = false, error = "parentPath missing" }
@@ -30,13 +45,14 @@ local function importAudioHandler(payload)
     local soundPaths = {}
     local warnings = {}
     local sourceId = Ownership.sourceId(payload, "audio")
+    local useSourceLookup = #payload.sounds == 1
     for index, spec in ipairs(payload.sounds) do
         local soundId = normalizeAssetId(spec.assetId)
         if not soundId then
             return { ok = false, error = "sound " .. tostring(index) .. " missing assetId" }
         end
         local name = StudioPath.sanitize(spec.name, "Sound")
-        local existing = parent:FindFirstChild(name)
+        local existing = (useSourceLookup and directChildWithSourceId(parent, sourceId)) or parent:FindFirstChild(name)
         if existing and not existing:IsA("Sound") then
             existing:Destroy()
             existing = nil

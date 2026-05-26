@@ -22,21 +22,58 @@ local textObject = {
 }
 
 local imageObject = {
-    "Image", "ImageColor3", "ImageRectOffset", "ImageRectSize", "ImageTransparency",
+    "ImageColor3", "ImageRectOffset", "ImageRectSize", "ImageTransparency",
     "ScaleType", "SliceCenter", "TileSize"
 }
 
 local attachment = { "CFrame", "Position", "Orientation", "Axis", "SecondaryAxis", "Visible" }
+
+local contentPropertiesByClass = {
+    Animation = { AnimationId = "animation" },
+    Beam = { Texture = "image" },
+    Decal = { Texture = "image" },
+    ImageButton = { Image = "image" },
+    ImageLabel = { Image = "image" },
+    MeshPart = { MeshId = "mesh", TextureID = "image" },
+    ParticleEmitter = { Texture = "image" },
+    ScrollingFrame = { BottomImage = "image", MidImage = "image", TopImage = "image" },
+    Sound = { SoundId = "audio" },
+    SpecialMesh = { MeshId = "mesh", TextureId = "image" },
+    SurfaceAppearance = {
+        ColorMap = "image",
+        MetalnessMap = "image",
+        NormalMap = "image",
+        RoughnessMap = "image"
+    },
+    Texture = { Texture = "image" },
+    Trail = { Texture = "image" }
+}
+
+local contentPropertyOrder = {
+    Animation = { "AnimationId" },
+    Beam = { "Texture" },
+    Decal = { "Texture" },
+    ImageButton = { "Image" },
+    ImageLabel = { "Image" },
+    MeshPart = { "MeshId", "TextureID" },
+    ParticleEmitter = { "Texture" },
+    ScrollingFrame = { "BottomImage", "MidImage", "TopImage" },
+    Sound = { "SoundId" },
+    SpecialMesh = { "MeshId", "TextureId" },
+    SurfaceAppearance = { "ColorMap", "MetalnessMap", "NormalMap", "RoughnessMap" },
+    Texture = { "Texture" },
+    Trail = { "Texture" }
+}
 
 local byClass = {
     Folder = {},
     Configuration = {},
     Model = { "PrimaryPart", "WorldPivot" },
     Tool = { "CanBeDropped", "Enabled", "Grip", "GripForward", "GripPos", "GripRight", "GripUp", "ManualActivationOnly", "RequiresHandle", "ToolTip" },
-    MeshPart = { "MeshId", "TextureID", "CollisionFidelity", "DoubleSided", "RenderFidelity" },
-    SpecialMesh = { "MeshId", "MeshType", "Offset", "Scale", "TextureId", "VertexColor" },
+    MeshPart = { "CollisionFidelity", "DoubleSided", "RenderFidelity" },
+    SpecialMesh = { "MeshType", "Offset", "Scale", "VertexColor" },
     UnionOperation = { "UsePartColor" },
-    SurfaceAppearance = { "ColorMap", "NormalMap", "MetalnessMap", "RoughnessMap", "AlphaMode", "Color" },
+    SurfaceAppearance = { "AlphaMode", "Color" },
     Weld = { "Part0", "Part1", "C0", "C1" },
     ManualWeld = { "Part0", "Part1", "C0", "C1" },
     Motor = { "Part0", "Part1", "C0", "C1", "CurrentAngle", "DesiredAngle", "MaxVelocity" },
@@ -49,16 +86,16 @@ local byClass = {
     ModuleScript = { "Source" },
     AnimationController = {},
     Animator = {},
-    Animation = { "AnimationId" },
+    Animation = {},
     BindableEvent = {},
     BindableFunction = {},
     RemoteEvent = {},
     RemoteFunction = {},
-    Sound = { "SoundId", "Volume", "PlaybackSpeed", "Looped", "RollOffMode", "RollOffMinDistance", "RollOffMaxDistance", "EmitterSize", "Playing", "TimePosition" },
+    Sound = { "Volume", "PlaybackSpeed", "Looped", "RollOffMode", "RollOffMinDistance", "RollOffMaxDistance", "EmitterSize", "Playing", "TimePosition" },
     ParticleEmitter = {
         "Acceleration", "Brightness", "Color", "Drag", "EmissionDirection", "Enabled", "Lifetime",
         "LightEmission", "LightInfluence", "LockedToPart", "Orientation", "Rate", "RotSpeed",
-        "Rotation", "Size", "Speed", "SpreadAngle", "Texture", "Transparency", "VelocityInheritance",
+        "Rotation", "Size", "Speed", "SpreadAngle", "Transparency", "VelocityInheritance",
         "ZOffset"
     },
     PointLight = { "Brightness", "Color", "Enabled", "Range", "Shadows" },
@@ -66,16 +103,16 @@ local byClass = {
     SurfaceLight = { "Angle", "Brightness", "Color", "Enabled", "Face", "Range", "Shadows" },
     Beam = {
         "Attachment0", "Attachment1", "Brightness", "Color", "CurveSize0", "CurveSize1", "Enabled",
-        "FaceCamera", "LightEmission", "LightInfluence", "Segments", "Texture", "TextureLength",
+        "FaceCamera", "LightEmission", "LightInfluence", "Segments", "TextureLength",
         "TextureMode", "TextureSpeed", "Transparency", "Width0", "Width1", "ZOffset"
     },
     Trail = {
         "Attachment0", "Attachment1", "Color", "Enabled", "FaceCamera", "Lifetime", "LightEmission",
-        "LightInfluence", "MaxLength", "MinLength", "Texture", "TextureLength", "TextureMode",
+        "LightInfluence", "MaxLength", "MinLength", "TextureLength", "TextureMode",
         "Transparency", "WidthScale"
     },
-    Decal = { "Color3", "Face", "Texture", "Transparency" },
-    Texture = { "Color3", "Face", "StudsPerTileU", "StudsPerTileV", "Texture", "Transparency" },
+    Decal = { "Color3", "Face", "Transparency" },
+    Texture = { "Color3", "Face", "StudsPerTileU", "StudsPerTileV", "Transparency" },
     StringValue = { "Value" },
     NumberValue = { "Value" },
     BoolValue = { "Value" },
@@ -94,7 +131,7 @@ local byClass = {
     TextBox = { "ClearTextOnFocus", "CursorPosition", "MultiLine", "PlaceholderColor3", "PlaceholderText", "ShowNativeInput", "TextEditable" },
     ImageLabel = {},
     ImageButton = { "AutoButtonColor", "Modal", "Selected", "Style" },
-    ScrollingFrame = { "AutomaticCanvasSize", "BottomImage", "CanvasPosition", "CanvasSize", "ElasticBehavior", "HorizontalScrollBarInset", "MidImage", "ScrollBarImageColor3", "ScrollBarImageTransparency", "ScrollBarThickness", "ScrollingDirection", "ScrollingEnabled", "TopImage", "VerticalScrollBarInset", "VerticalScrollBarPosition" },
+    ScrollingFrame = { "AutomaticCanvasSize", "CanvasPosition", "CanvasSize", "ElasticBehavior", "HorizontalScrollBarInset", "ScrollBarImageColor3", "ScrollBarImageTransparency", "ScrollBarThickness", "ScrollingDirection", "ScrollingEnabled", "VerticalScrollBarInset", "VerticalScrollBarPosition" },
     UIListLayout = { "FillDirection", "HorizontalAlignment", "Padding", "SortOrder", "VerticalAlignment" },
     UIGridLayout = { "CellPadding", "CellSize", "FillDirection", "HorizontalAlignment", "SortOrder", "StartCorner", "VerticalAlignment" },
     UICorner = { "CornerRadius" },
@@ -128,6 +165,16 @@ local function append(target, source)
     end
 end
 
+local function appendContentProperties(target, className)
+    local names = contentPropertyOrder[className]
+    if not names then
+        return
+    end
+    for _, property in ipairs(names) do
+        table.insert(target, property)
+    end
+end
+
 function Allowlist.forInstance(instance)
     local props = {}
     append(props, common)
@@ -149,7 +196,31 @@ function Allowlist.forInstance(instance)
     end
 
     append(props, byClass[instance.ClassName] or {})
+    appendContentProperties(props, instance.ClassName)
     return props
+end
+
+function Allowlist.contentPropertiesForClass(className)
+    local source = contentPropertiesByClass[className]
+    local copy = {}
+    if source then
+        for property, kind in pairs(source) do
+            copy[property] = kind
+        end
+    end
+    return copy
+end
+
+function Allowlist.contentKindForClass(className, property)
+    local props = contentPropertiesByClass[className]
+    return props and props[property] or nil
+end
+
+function Allowlist.contentKindFor(instance, property)
+    if not instance then
+        return nil
+    end
+    return Allowlist.contentKindForClass(instance.ClassName, property)
 end
 
 return Allowlist

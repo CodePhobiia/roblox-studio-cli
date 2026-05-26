@@ -19,6 +19,8 @@ struct SyncTarget {
     #[serde(default)]
     patterns: Vec<String>,
     kind: Option<String>,
+    #[serde(rename = "sourceId")]
+    source_id: Option<String>,
 }
 
 pub fn run(
@@ -78,6 +80,7 @@ fn load_targets(
         to: parent_path.unwrap_or_else(|| "Workspace".to_string()),
         patterns: Vec::new(),
         kind: None,
+        source_id: None,
     }])
 }
 
@@ -90,6 +93,7 @@ fn run_once(
     force: bool,
 ) -> AppResult<()> {
     for target in targets {
+        let source_id = target_source_id(target);
         let files = collect_files(&target.folder, &target.patterns)?;
         let mut script_items = Vec::new();
         let mut png_files = Vec::new();
@@ -121,7 +125,7 @@ fn run_once(
                     delete,
                     force,
                     items: script_items,
-                    source_id: None,
+                    source_id: Some(source_id.clone()),
                 },
                 150,
             )?;
@@ -221,6 +225,7 @@ fn script_item(root: &Path, file: &Path, class_name: &str) -> AppResult<UpsertFi
         .unwrap_or(file)
         .to_string_lossy()
         .replace('\\', "/");
+    crate::cli::export::validate_safe_relative_path(&relative, "sync-folder file path")?;
     let stem = file
         .file_name()
         .and_then(|value| value.to_str())
@@ -237,6 +242,31 @@ fn script_item(root: &Path, file: &Path, class_name: &str) -> AppResult<UpsertFi
         source: Some(std::fs::read_to_string(file)?),
         attributes: BTreeMap::new(),
     })
+}
+
+fn target_source_id(target: &SyncTarget) -> String {
+    target.source_id.clone().unwrap_or_else(|| {
+        let root = target
+            .folder
+            .canonicalize()
+            .unwrap_or_else(|_| target.folder.clone())
+            .to_string_lossy()
+            .replace('\\', "/");
+        stable_sync_source_id(&format!("{}|{}", root, target.to))
+    })
+}
+
+pub(crate) fn stable_sync_source_id(seed: &str) -> String {
+    format!("sync-{:016x}", fnv1a64(seed.as_bytes()))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn has_ext(path: &Path, extensions: &[&str]) -> bool {
@@ -265,4 +295,42 @@ fn fingerprint_targets(targets: &[SyncTarget]) -> AppResult<Vec<(PathBuf, u64, u
     }
     rows.sort();
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{script_item, stable_sync_source_id, target_source_id, SyncTarget};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn stable_sync_source_id_is_deterministic() {
+        assert_eq!(
+            stable_sync_source_id("folder|Workspace"),
+            stable_sync_source_id("folder|Workspace")
+        );
+        assert_ne!(
+            stable_sync_source_id("folder|Workspace"),
+            stable_sync_source_id("other|Workspace")
+        );
+    }
+
+    #[test]
+    fn target_source_id_uses_manifest_value_when_supplied() {
+        let target = SyncTarget {
+            folder: PathBuf::from("src"),
+            to: "ServerScriptService".to_string(),
+            patterns: Vec::new(),
+            kind: None,
+            source_id: Some("sync-custom".to_string()),
+        };
+        assert_eq!(target_source_id(&target), "sync-custom");
+    }
+
+    #[test]
+    fn script_item_rejects_unsafe_relative_path() {
+        let root = Path::new("root");
+        let bad_file = Path::new("root/Scripts/CON.server.lua");
+        let result = script_item(root, bad_file, "Script");
+        assert!(result.is_err());
+    }
 }

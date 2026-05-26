@@ -1,20 +1,8 @@
 local HttpService = game:GetService("HttpService")
+local Allowlist = require(script.Parent.PropertyAllowlist)
 local Serializer = require(script.Parent.Serializer)
 
 local Exporter = {}
-
-local ASSET_PROPERTIES = {
-    AnimationId = "animation",
-    BottomImage = "image",
-    Image = "image",
-    MidImage = "image",
-    MeshId = "mesh",
-    SoundId = "audio",
-    TopImage = "image",
-    Texture = "image",
-    TextureID = "image",
-    TextureId = "image"
-}
 
 local SCRIPT_EXTENSIONS = {
     Script = ".server.lua",
@@ -69,22 +57,9 @@ local function addFile(files, path, kind, content, json)
     })
 end
 
-local function assetKindFor(instance, property)
-    if instance:IsA("ParticleEmitter") or instance:IsA("Beam") or instance:IsA("Trail") then
-        if property == "Texture" then
-            return "vfx-texture"
-        end
-    end
-    return ASSET_PROPERTIES[property]
-end
-
 local function addAssetFiles(files, dir, metadata)
     for property, value in pairs(metadata.properties or {}) do
-        local kind = assetKindFor({
-            IsA = function(_, className)
-                return metadata.className == className
-            end
-        }, property)
+        local kind = Allowlist.contentKindForClass(metadata.className, property)
         if kind and type(value) == "string" and value ~= "" then
             addFile(files, joinPath(dir, "assets/" .. sanitize(property) .. ".asset.json"), kind, nil, {
                 instancePath = metadata.fullPath,

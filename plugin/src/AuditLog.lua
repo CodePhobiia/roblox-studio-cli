@@ -99,6 +99,7 @@ function AuditLog.record(command, result)
         pathsChanged = collectPaths(data),
         warnings = type(data.warnings) == "table" and data.warnings or {},
         error = result.ok and nil or tostring(result.error or "unknown error"),
+        undoable = type(data.snapshotBefore) == "table" and type(data.restoreParentPath) == "string",
         snapshotBefore = data.snapshotBefore,
         restoreParentPath = data.restoreParentPath
     }

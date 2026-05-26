@@ -2,7 +2,7 @@ use crate::error::{AppError, AppResult};
 use crate::protocol::messages::{ExportFile, ExportRequest, ExportResponse, SerializeRequest};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn run(
@@ -40,8 +40,15 @@ pub fn run(
     let tree_root = out.join("tree");
     std::fs::create_dir_all(&tree_root)?;
     let mut counts = BTreeMap::<String, usize>::new();
+    let source_id = crate::cli::sync_folder::stable_sync_source_id(&format!(
+        "{}|{}",
+        studio.as_deref().unwrap_or("<default-studio>"),
+        export.root_path
+    ));
+    let mut file_mappings = Vec::new();
     for file in &export.files {
-        let target = safe_join(&tree_root, &file.path)?;
+        let target =
+            crate::cli::export::safe_relative_join(&tree_root, &file.path, "sync-pull file path")?;
         if target.exists() && !overwrite {
             return Err(AppError::Other(format!(
                 "refusing to overwrite existing file: {} (pass --overwrite)",
@@ -53,6 +60,13 @@ pub fn run(
         }
         write_export_file(&target, file)?;
         *counts.entry(file.kind.clone()).or_default() += 1;
+        file_mappings.push(serde_json::json!({
+            "path": file.path,
+            "kind": file.kind,
+            "className": file.json.as_ref().and_then(|json| json.get("className")).and_then(Value::as_str),
+            "studioPath": file.json.as_ref().and_then(|json| json.get("fullPath")).and_then(Value::as_str),
+            "sourceId": source_id.clone()
+        }));
     }
 
     let blob_path = out.join("transfer_blob.json");
@@ -67,12 +81,19 @@ pub fn run(
         "kind": "rsSyncPull",
         "sourceStudio": studio,
         "sourcePath": path,
-        "rootPath": export.root_path,
+        "rootPath": export.root_path.clone(),
+        "sourceId": source_id.clone(),
         "generatedUnixSeconds": now_unix_seconds(),
         "fileCount": export.files.len(),
         "counts": counts,
         "transferBlob": "transfer_blob.json",
-        "tree": "tree"
+        "tree": "tree",
+        "files": file_mappings,
+        "syncTargets": [{
+            "folder": "tree",
+            "to": export.root_path.clone(),
+            "sourceId": source_id
+        }]
     });
     std::fs::write(
         out.join("sync_pull_manifest.json"),
@@ -108,27 +129,6 @@ fn write_export_file(target: &Path, file: &ExportFile) -> AppResult<()> {
         std::fs::write(target, "")?;
     }
     Ok(())
-}
-
-fn safe_join(base: &Path, relative: &str) -> AppResult<PathBuf> {
-    let rel = Path::new(relative);
-    if rel.is_absolute() {
-        return Err(AppError::Other(format!(
-            "sync-pull file path must be relative: {relative}"
-        )));
-    }
-    let mut target = PathBuf::from(base);
-    for component in rel.components() {
-        match component {
-            Component::Normal(part) => target.push(part),
-            _ => {
-                return Err(AppError::Other(format!(
-                    "unsafe sync-pull path component in: {relative}"
-                )))
-            }
-        }
-    }
-    Ok(target)
 }
 
 fn now_unix_seconds() -> u64 {

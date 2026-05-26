@@ -21,6 +21,11 @@ pub struct StudioSession {
     pub pending_results: HashMap<String, oneshot::Sender<CommandResult>>,
 }
 
+pub struct QueuedCommand {
+    pub command_id: String,
+    pub result: oneshot::Receiver<CommandResult>,
+}
+
 #[derive(Clone, Default)]
 pub struct Registry {
     inner: Arc<RwLock<HashMap<String, StudioSession>>>,
@@ -171,12 +176,25 @@ impl Registry {
         }
     }
 
+    #[cfg(test)]
     pub async fn enqueue(
         &self,
         session_token: &str,
         kind: impl Into<String>,
         payload: serde_json::Value,
     ) -> AppResult<oneshot::Receiver<CommandResult>> {
+        Ok(self
+            .enqueue_command(session_token, kind, payload)
+            .await?
+            .result)
+    }
+
+    pub async fn enqueue_command(
+        &self,
+        session_token: &str,
+        kind: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> AppResult<QueuedCommand> {
         self.expire_stale().await;
         let command_id = Uuid::new_v4().to_string();
         let command = PluginCommand {
@@ -193,10 +211,13 @@ impl Registry {
                 name: session_token.to_string(),
             })?;
         session.pending_commands.push_back(command);
-        session.pending_results.insert(command_id, tx);
+        session.pending_results.insert(command_id.clone(), tx);
         drop(map);
         self.notify.notify_waiters();
-        Ok(rx)
+        Ok(QueuedCommand {
+            command_id,
+            result: rx,
+        })
     }
 
     pub async fn ensure_protocol(&self, session_token: &str, expected: u32) -> AppResult<()> {
@@ -217,6 +238,28 @@ impl Registry {
                 .protocol_version
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".into()),
+        })
+    }
+
+    pub async fn ensure_capability(&self, session_token: &str, capability: &str) -> AppResult<()> {
+        self.expire_stale().await;
+        let map = self.inner.read().await;
+        let session = map
+            .get(session_token)
+            .ok_or_else(|| AppError::StudioNotConnected {
+                name: session_token.to_string(),
+            })?;
+        if session
+            .capabilities
+            .iter()
+            .any(|advertised| advertised == capability)
+        {
+            return Ok(());
+        }
+        Err(AppError::PluginCapabilityMissing {
+            studio: session.name.clone(),
+            command: capability.to_string(),
+            capabilities: session.capabilities.clone(),
         })
     }
 
@@ -262,6 +305,20 @@ impl Registry {
             }
         }
         Err(AppError::Other(format!("unknown command id: {command_id}")))
+    }
+
+    pub async fn cancel_pending_command(&self, command_id: &str) -> bool {
+        let mut map = self.inner.write().await;
+        let mut removed = false;
+        for session in map.values_mut() {
+            let before = session.pending_commands.len();
+            session
+                .pending_commands
+                .retain(|command| command.command_id != command_id);
+            removed |= session.pending_commands.len() != before;
+            removed |= session.pending_results.remove(command_id).is_some();
+        }
+        removed
     }
 
     async fn expire_stale(&self) {
@@ -434,5 +491,212 @@ mod tests {
         let result = rx.await.unwrap();
         assert!(result.ok);
         assert_eq!(result.data.unwrap(), serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn ensure_protocol_rejects_mismatch() {
+        let reg = Registry::new();
+        let token = reg
+            .register(RegisterRequest {
+                id: "A".into(),
+                name: "Project".into(),
+                place_file_path: None,
+                protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION - 1),
+                plugin_version: Some("0.1.0".into()),
+                capabilities: vec!["deserialize".into()],
+            })
+            .await;
+
+        let err = reg
+            .ensure_protocol(&token, crate::protocol::messages::PLUGIN_PROTOCOL_VERSION)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            AppError::PluginProtocolMismatch {
+                studio,
+                expected: crate::protocol::messages::PLUGIN_PROTOCOL_VERSION,
+                ..
+            } if studio == "Project"
+        ));
+    }
+
+    #[tokio::test]
+    async fn ensure_capability_rejects_missing_command_capability() {
+        let reg = Registry::new();
+        let token = reg
+            .register(RegisterRequest {
+                id: "A".into(),
+                name: "Project".into(),
+                place_file_path: None,
+                protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+                plugin_version: Some("0.1.0".into()),
+                capabilities: vec!["serialize".into()],
+            })
+            .await;
+
+        reg.ensure_capability(&token, "serialize").await.unwrap();
+        let err = reg
+            .ensure_capability(&token, "deserialize")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            AppError::PluginCapabilityMissing {
+                studio,
+                command,
+                ..
+            } if studio == "Project" && command == "deserialize"
+        ));
+    }
+
+    #[tokio::test]
+    async fn queue_polls_commands_fifo() {
+        let reg = Registry::new();
+        let token = reg
+            .register(RegisterRequest {
+                id: "A".into(),
+                name: "Project".into(),
+                place_file_path: None,
+                protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+                plugin_version: Some("0.1.0".into()),
+                capabilities: vec![],
+            })
+            .await;
+
+        let _first = reg
+            .enqueue_command(&token, "read", serde_json::json!({"path": "Workspace"}))
+            .await
+            .unwrap();
+        let _second = reg
+            .enqueue_command(&token, "validate", serde_json::json!({"path": "Workspace"}))
+            .await
+            .unwrap();
+
+        let first = reg
+            .poll(&token, Duration::from_millis(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let second = reg
+            .poll(&token, Duration::from_millis(1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.kind, "read");
+        assert_eq!(second.kind, "validate");
+    }
+
+    #[tokio::test]
+    async fn queue_is_independent_per_session() {
+        let reg = Registry::new();
+        let token_a = reg
+            .register(RegisterRequest {
+                id: "A".into(),
+                name: "Project A".into(),
+                place_file_path: None,
+                protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+                plugin_version: Some("0.1.0".into()),
+                capabilities: vec![],
+            })
+            .await;
+        let token_b = reg
+            .register(RegisterRequest {
+                id: "B".into(),
+                name: "Project B".into(),
+                place_file_path: None,
+                protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+                plugin_version: Some("0.1.0".into()),
+                capabilities: vec![],
+            })
+            .await;
+
+        reg.enqueue_command(&token_a, "read", serde_json::json!({"path": "Workspace"}))
+            .await
+            .unwrap();
+
+        assert!(reg
+            .poll(&token_b, Duration::from_millis(1))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            reg.poll(&token_a, Duration::from_millis(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .kind,
+            "read"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_command_removes_queue_and_result_sender() {
+        let reg = Registry::new();
+        let token = reg
+            .register(RegisterRequest {
+                id: "A".into(),
+                name: "Project".into(),
+                place_file_path: None,
+                protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+                plugin_version: Some("0.1.0".into()),
+                capabilities: vec![],
+            })
+            .await;
+        let queued = reg
+            .enqueue_command(&token, "read", serde_json::json!({"path": "Workspace"}))
+            .await
+            .unwrap();
+
+        assert!(reg.cancel_pending_command(&queued.command_id).await);
+        assert!(reg
+            .poll(&token, Duration::from_millis(1))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(queued.result.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn submit_result_rejects_unknown_command_id() {
+        let reg = Registry::new();
+        let err = reg
+            .submit_result(
+                "missing",
+                CommandResult {
+                    ok: true,
+                    data: Some(serde_json::json!(null)),
+                    error: None,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("unknown command id: missing"));
+    }
+
+    #[tokio::test]
+    async fn stale_sessions_expire_before_listing() {
+        let reg = Registry::new();
+        let token = reg
+            .register(RegisterRequest {
+                id: "A".into(),
+                name: "Project".into(),
+                place_file_path: None,
+                protocol_version: Some(crate::protocol::messages::PLUGIN_PROTOCOL_VERSION),
+                plugin_version: Some("0.1.0".into()),
+                capabilities: vec![],
+            })
+            .await;
+        {
+            let mut map = reg.inner.write().await;
+            map.get_mut(&token).unwrap().last_heartbeat =
+                Instant::now() - SESSION_TTL - Duration::from_millis(1);
+        }
+
+        assert!(reg.list().await.is_empty());
     }
 }

@@ -26,6 +26,23 @@ reviewer must be able to find each required artifact from the packet root. Use
 relative paths when possible. Do not copy secrets, API keys, Roblox credentials,
 local profile data, or private Studio paths into the packet.
 
+## Machine-Readable Bindings
+
+The CLI now records the safety proof that makes an approved apply command exact:
+
+- `approval.json` includes `planHash`, `previewIntegrityStatus`, and the exact
+  `applyCommand` the creator is being asked to approve.
+- `live-gate.json` includes `planHash`, `approvalPlanHash`,
+  `previewIntegrityStatus`, `approved`, and the same exact `applyCommand`.
+- `autopilot apply` refuses to continue before bridge or Studio contact unless
+  `approval.json` and a ready `live-gate.json` match the current `plan.json`,
+  preview integrity passed, and the invoked flags match the approved command.
+- `certification.json`, `review-pack.json`, and `evidence-kit.json` expose
+  `alphaPacket` completeness so reviewers can see which repo and live proof
+  files are still missing without adding a separate command.
+- `smoke regression --upload-mock` is an offline schema/redaction check for the
+  upload request shape. It must not contact Studio or Roblox cloud services.
+
 ## Invite Decision
 
 Private-alpha invite status is `GO` only when every mandatory row below is
@@ -37,6 +54,8 @@ blocker in the repo-check or live-Studio categories keeps the decision at
 | --- | --- | --- | --- | --- |
 | Plan | `plan.json`, generated file list, selected recipe or manifest, creator prompt, assumptions, and operation count. | `target\release\rs.exe autopilot plan --from-manifest examples\starter-shop.autopilot.json --out .rs\autopilot\runs\<run-id> --format json` or the exact prompt/manifest command used for the alpha run. | None. Planning is offline. | Plan is missing, schema-invalid, not reproducible, or includes unexplained risky/destructive operations. |
 | Preview | `preview.json`, preview integrity state, operation summary, warnings, and safe-to-preview status. | `target\release\rs.exe autopilot preview --plan .rs\autopilot\runs\<run-id>\plan.json --format json` without `--live`. | Optional dry-run only: `target\release\rs.exe autopilot preview --studio "<Studio>" --plan .rs\autopilot\runs\<run-id>\plan.json --live --format json`. | Offline preview fails, generated files drift after preview, or live dry-run reports unresolved blockers. |
+| Approval | `approval.json`, `approval.md`, `planHash`, `previewIntegrityStatus`, and exact `applyCommand`. | `target\release\rs.exe autopilot approval .rs\autopilot\runs\<run-id> --format json`. | Owner must approve the exact command and target Studio place named in the packet. | Approval is missing, preview integrity is not `pass`, plan hash does not match, or owner approval names a different command/run/place. |
+| Live gate | `live-gate.json`, `live-gate.md`, approval binding check, readiness status, and exact approved apply command. | Non-live reviewers may inspect existing `live-gate.json`; do not manufacture readiness proof offline. | `target\release\rs.exe autopilot live-gate --run-dir .rs\autopilot\runs\<run-id> --approved --studio "<Studio>" --format json`. | Gate is not `readyToApply`, approval binding fails, readiness fails, or command differs from `approval.json`. |
 | Changed paths | A human-readable table of planned Studio paths, generated repo paths, and any repo docs/code changed for the alpha candidate. | Compare `plan.json`, `preview.json`, and `git diff --name-only` for the candidate branch. | Confirm `apply.json`, `history`, or Studio review output matches the same touched paths after live apply. | A path is unowned, unexpected, manually edited outside the packet, or not traceable to plan/apply evidence. |
 | Validation | Exact static commands and results plus generated validation artifacts. | Minimum repo set: `cargo fmt --check -p rs`, `cargo test -p rs`, and `cargo build --release -p rs`. Add narrower command-specific tests when source code changed. | After live apply, require validation evidence from the approved apply command or a manual `rs validate` command recorded in `live-demo.md`. | Any required static check fails, validation is missing, or validation warnings are accepted without owner sign-off. |
 | Rollback | `rollback.json`, `rollback.md`, rollback artifact path, restore command or manual restore note, and whether automatic restore is available. | `target\release\rs.exe autopilot rollback .rs\autopilot\runs\<run-id> --format json` may legitimately report `needsApply` before live work. | After apply, rerun rollback and verify the rollback artifact exists. If restore is manual, document the exact manual owner and restore path. | Applied changes have no rollback artifact, rollback scope is unclear, or restore requires unreviewed destructive action. |
@@ -57,10 +76,12 @@ cargo build --release -p rs
 
 target\release\rs.exe autopilot plan --from-manifest examples\starter-shop.autopilot.json --out .rs\autopilot\runs\<run-id> --format json
 target\release\rs.exe autopilot preview --plan .rs\autopilot\runs\<run-id>\plan.json --format json
+target\release\rs.exe autopilot certify .rs\autopilot\runs\<run-id> --format json
 target\release\rs.exe autopilot review-pack .rs\autopilot\runs\<run-id> --format json
 target\release\rs.exe autopilot proof .rs\autopilot\runs\<run-id> --format json
 target\release\rs.exe autopilot privacy .rs\autopilot\runs\<run-id> --format json
 target\release\rs.exe autopilot approval .rs\autopilot\runs\<run-id> --format json
+target\release\rs.exe autopilot evidence .rs\autopilot\runs\<run-id> --format json
 target\release\rs.exe autopilot rehearsal .rs\autopilot\runs\<run-id> --format json
 target\release\rs.exe autopilot closeout .rs\autopilot\runs\<run-id> --format json
 ```
@@ -96,7 +117,8 @@ processes while collecting evidence.
    ```
 
 5. Apply only the approved command from `live-gate.json` or `approval.json`.
-   The command must include rollback capture and validation, for example:
+   The command must match the recorded plan hash, preview integrity result, and
+   apply flags. It must include rollback capture and validation, for example:
 
    ```powershell
    target\release\rs.exe autopilot apply --studio "<Studio>" --plan .rs\autopilot\runs\<run-id>\plan.json --yes --rollback-on-error --validate --smoke regression --format json

@@ -77,3 +77,21 @@ Observed bands in the current file:
   existing root tests as regression coverage.
 - Each extraction should run the smallest relevant `cargo test -p rs <test-name>` filters first, then a
   broader non-live Rust check that covers the touched module.
+
+## Worker F Safety Additions
+
+The Autopilot/Smoke/Evidence proof slice intentionally stayed in the root module
+except for existing `autopilot/util.rs` helpers. The following helpers are good
+future extraction candidates once `readiness.rs` and `apply.rs` are ready:
+
+- Approval/live gate proof binding: plan hash, preview integrity, exact apply
+  command, and pre-bridge `apply` refusal.
+- Alpha packet completeness checks shared by `certify`, `review-pack`, and
+  `evidence`.
+- Privacy-scan enforcement before handoff, model-pack, review-pack, and
+  evidence packet publication.
+- Offline smoke upload mock request-shape and redaction validation.
+
+Keep these moves behavior-preserving. The current safety contract depends on the
+same command strings, JSON field names, Markdown headings, and refusal messages
+remaining stable for downstream review packets.

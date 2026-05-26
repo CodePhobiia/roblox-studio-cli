@@ -2,9 +2,32 @@ local ImportImage = require(script.Parent.Parent.ImportImage)
 local Ownership = require(script.Parent.Parent.Ownership)
 local StudioPath = require(script.Parent.Parent.StudioPath)
 
-local function resolveContainer(parent, name)
+local function directChildWithSourceId(parent, sourceId)
+    if type(sourceId) ~= "string" or sourceId == "" then
+        return nil
+    end
+    for _, child in ipairs(parent:GetChildren()) do
+        local ok, childSourceId, managedBy = pcall(function()
+            return child:GetAttribute("rsSourceId"), child:GetAttribute("rsManagedBy")
+        end)
+        if ok and childSourceId == sourceId and managedBy == "rs" then
+            return child
+        end
+    end
+    return nil
+end
+
+local function resolveContainer(parent, name, sourceId)
     if parent:IsA("StarterGui") or parent:IsA("PlayerGui") then
         local guiName = StudioPath.sanitize(name, "ImportedGui")
+        local existingBySource = directChildWithSourceId(parent, sourceId)
+        if existingBySource and existingBySource:IsA("ScreenGui") then
+            existingBySource.Name = guiName
+            existingBySource.ResetOnSpawn = false
+            return existingBySource, existingBySource, nil
+        elseif existingBySource then
+            existingBySource:Destroy()
+        end
         local existing = parent:FindFirstChild(guiName)
         if existing and existing:IsA("ScreenGui") then
             return existing, existing, nil
@@ -123,11 +146,11 @@ local function importUiPackHandler(payload)
         return { ok = false, error = resolveErr }
     end
 
-    local container, guiRoot, containerErr = resolveContainer(parent, payload.name)
+    local sourceId = Ownership.sourceId(payload, "ui")
+    local container, guiRoot, containerErr = resolveContainer(parent, payload.name, sourceId)
     if not container then
         return { ok = false, error = containerErr }
     end
-    local sourceId = Ownership.sourceId(payload, "ui")
     Ownership.stamp(guiRoot, sourceId)
 
     local elementPaths = {}

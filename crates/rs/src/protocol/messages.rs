@@ -374,6 +374,10 @@ pub struct RepairToolRequest {
 pub struct RepairToolResponse {
     pub path: String,
     pub dry_run: bool,
+    #[serde(default)]
+    pub fix_ids: Vec<String>,
+    #[serde(default)]
+    pub changed_paths: Vec<String>,
     pub parts_found: usize,
     pub valid_joints_preserved: usize,
     pub broken_joints_found: usize,
@@ -664,6 +668,8 @@ pub struct DependencyReference {
     pub value: String,
     #[serde(default)]
     pub flags: Vec<String>,
+    #[serde(default)]
+    pub rule_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -680,4 +686,50 @@ pub struct DepsResponse {
     pub unowned_instances: Vec<String>,
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+mod diagnostic_contract_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_contract_dependency_reference_preserves_rule_ids() {
+        let reference = DependencyReference {
+            path: "Workspace.Tool.Handle".to_string(),
+            class_name: "MeshPart".to_string(),
+            property: "MeshId".to_string(),
+            kind: "mesh".to_string(),
+            value: "".to_string(),
+            flags: vec!["missing".to_string()],
+            rule_ids: vec!["asset.mesh.missing".to_string()],
+        };
+
+        let value = serde_json::to_value(&reference).unwrap();
+        assert_eq!(value["ruleIds"][0], "asset.mesh.missing");
+        let back: DependencyReference = serde_json::from_value(value).unwrap();
+        assert_eq!(back.rule_ids, vec!["asset.mesh.missing".to_string()]);
+    }
+
+    #[test]
+    fn diagnostic_contract_repair_response_allows_fix_ids_and_changed_paths() {
+        let response = RepairToolResponse {
+            path: "Workspace.Tool".to_string(),
+            dry_run: true,
+            fix_ids: vec!["fix.tool.weld-disconnected-parts".to_string()],
+            changed_paths: vec!["Workspace.Tool.Part".to_string()],
+            parts_found: 2,
+            valid_joints_preserved: 0,
+            broken_joints_found: 0,
+            welds_created: 1,
+            physics_properties_changed: 0,
+            warnings: vec![],
+        };
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["fixIds"][0], "fix.tool.weld-disconnected-parts");
+        assert_eq!(value["changedPaths"][0], "Workspace.Tool.Part");
+        let back: RepairToolResponse = serde_json::from_value(value).unwrap();
+        assert_eq!(back.fix_ids.len(), 1);
+        assert_eq!(back.changed_paths.len(), 1);
+    }
 }

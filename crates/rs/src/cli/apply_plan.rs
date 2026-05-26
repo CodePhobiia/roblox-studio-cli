@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::protocol::messages::{ApplyPlanRequest, ApplyPlanResponse};
+use crate::protocol::messages::ApplyPlanRequest;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -22,7 +22,7 @@ pub fn run(
         ));
     }
     let plan: Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
-    let response: ApplyPlanResponse = crate::cli::request::post(
+    let response: Value = crate::cli::request::post(
         port,
         "apply-plan",
         "/apply-plan",
@@ -42,37 +42,106 @@ pub fn run(
     if json {
         println!("{}", serde_json::to_string_pretty(&response)?);
     } else {
-        let verb = if response.dry_run {
+        let verb = if bool_field(&response, "dryRun") {
             "Planned"
         } else {
             "Applied"
         };
         println!(
             "{verb} {} operation(s) under {}",
-            response.applied, response.root_path
+            usize_field(&response, "applied"),
+            string_field(&response, "rootPath")
         );
         println!(
             "Skipped: {}  Refused: {}",
-            response.skipped, response.refused
+            usize_field(&response, "skipped"),
+            usize_field(&response, "refused")
         );
-        if !response.changed_paths.is_empty() {
-            println!("Changed paths:");
-            for path in response.changed_paths.iter().take(25) {
-                println!("  - {path}");
-            }
-            if response.changed_paths.len() > 25 {
-                println!("  ... ({} more)", response.changed_paths.len() - 25);
-            }
+        if let Some(snapshot_recorded) = response.get("snapshotRecorded").and_then(Value::as_bool) {
+            println!(
+                "Snapshot recorded: {}  Rolled back: {}",
+                snapshot_recorded,
+                bool_field(&response, "rolledBack")
+            );
         }
-        if !response.warnings.is_empty() {
-            println!("Warnings:");
-            for warning in response.warnings.iter().take(25) {
-                println!("  - {warning}");
-            }
-            if response.warnings.len() > 25 {
-                println!("  ... ({} more)", response.warnings.len() - 25);
-            }
-        }
+        print_string_list("Changed paths", array_field(&response, "changedPaths"), 25);
+        print_string_list("Refused paths", array_field(&response, "refusedPaths"), 25);
+        print_operation_results(&response);
+        print_string_list("Warnings", array_field(&response, "warnings"), 25);
     }
     Ok(())
+}
+
+fn string_field<'a>(value: &'a Value, key: &str) -> &'a str {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>")
+}
+
+fn bool_field(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn usize_field(value: &Value, key: &str) -> usize {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+fn array_field<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn print_string_list(label: &str, values: &[Value], limit: usize) {
+    if values.is_empty() {
+        return;
+    }
+    println!("{label}:");
+    for value in values.iter().take(limit) {
+        println!("  - {}", value.as_str().unwrap_or("<value>"));
+    }
+    if values.len() > limit {
+        println!("  ... ({} more)", values.len() - limit);
+    }
+}
+
+fn print_operation_results(response: &Value) {
+    let results = array_field(response, "operationResults");
+    if results.is_empty() {
+        return;
+    }
+    println!("Operation results:");
+    for result in results.iter().take(25) {
+        let index = result.get("index").and_then(Value::as_u64).unwrap_or(0);
+        let status = result
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("<status>");
+        let action = result
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("<action>");
+        let path = result
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("<path>");
+        if let Some(property) = result.get("property").and_then(Value::as_str) {
+            println!("  - #{index} {status} {action} {path}.{property}");
+        } else {
+            println!("  - #{index} {status} {action} {path}");
+        }
+        if let Some(message) = result.get("message").and_then(Value::as_str) {
+            println!("    {message}");
+        }
+    }
+    if results.len() > 25 {
+        println!("  ... ({} more)", results.len() - 25);
+    }
 }

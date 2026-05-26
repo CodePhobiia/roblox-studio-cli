@@ -36,8 +36,21 @@ When a serialized weld, joint, or attachment constraint points outside the selec
 
 Cross-Studio transfer asks the target plugin to validate `refs,welds,tool` after deserialize. Validation failures make transfer fail; when `--rollback-on-error` is set, the plugin removes the imported root and restores any replaced destination child.
 
-Image-like properties remain Roblox asset URI strings in the blob, including `Image`,
-`Texture`, `TextureID`, `TextureId`, and scrolling-frame `BottomImage`, `MidImage`, and
-`TopImage`. `rs package import --rehost-images` and `rs transfer --rehost-images` can
-download those referenced image assets through Open Cloud, upload target-owned copies, and
-rewrite the in-memory blob before deserialization.
+Content-like properties remain Roblox asset URI strings in the blob where the
+Studio property accepts URI assignment, including UI `Image`, decal/texture/VFX
+`Texture`, mesh `MeshId`, `TextureID`, `TextureId`, sound `SoundId`, animation
+`AnimationId`, scrolling-frame `BottomImage`, `MidImage`, `TopImage`, and
+`SurfaceAppearance` `ColorMap`, `MetalnessMap`, `NormalMap`, and `RoughnessMap`.
+The plugin serializer/exporter/deps surfaces are aligned to this
+content-property matrix for these families. `rs package import --rehost-images` and
+`rs transfer --rehost-images` can download the CLI-supported image references
+through Open Cloud, upload target-owned copies, and rewrite the in-memory blob
+before deserialization. Rehost coverage is defined by the Rust rehost matrix;
+content IDs outside that matrix are preserved as references.
+
+Package import and update run a local preflight before sending any mutating
+Studio request. The CLI requires package manifest version `1`, a non-empty
+`packageId`, a readable version `1` `transfer_blob.json`, a known conflict mode,
+and clean `checksums.json` coverage with no missing, mismatched, or unexpected
+files. Legacy package folders without `packageId` can still be inspected, but
+mutation is refused until they are re-exported with current package metadata.

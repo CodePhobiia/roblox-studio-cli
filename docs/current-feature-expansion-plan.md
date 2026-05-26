@@ -637,6 +637,13 @@ Proof:
 - Docs examples that state when a step is offline, live dry-run, live apply, or
   cloud side effect.
 
+Status links:
+
+- Static docs/capability drift coverage: `crates/rs/src/plugin_static_tests.rs`
+  and `.github/workflows/ci.yml`.
+- Updated local bridge and side-effect docs: `README.md`, `plugin/README.md`,
+  `docs/architecture.md`, and `docs/protocol.md`.
+
 ## Definition Of Done
 
 A current feature is alpha-solid only when:

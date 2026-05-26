@@ -31,6 +31,13 @@ pub enum AppError {
         actual: String,
     },
 
+    #[error("plugin capability missing for studio '{studio}': command '{command}' is not advertised by the connected plugin. Advertised capabilities: {capabilities:?}. Rebuild/install the rs plugin and reopen that Studio window when ready.")]
+    PluginCapabilityMissing {
+        studio: String,
+        command: String,
+        capabilities: Vec<String>,
+    },
+
     #[error("command timed out after {timeout_ms}ms")]
     CommandTimeout { timeout_ms: u64 },
 
@@ -63,13 +70,16 @@ impl AppError {
             AppError::Silent { exit_code, .. } => *exit_code,
             AppError::BridgeUnreachable { .. } | AppError::BridgeStartFailed { .. } => 2,
             AppError::StudioNotConnected { .. } | AppError::StudioAmbiguous { .. } => 3,
-            AppError::PluginError(_) | AppError::PluginProtocolMismatch { .. } => 4,
+            AppError::PluginError(_)
+            | AppError::PluginProtocolMismatch { .. }
+            | AppError::PluginCapabilityMissing { .. } => 4,
             AppError::CommandTimeout { .. } => 5,
             AppError::BridgeResponse { code, .. } => match code.as_str() {
                 "bridge-unreachable" => 2,
                 "studio-not-found" | "studio-ambiguous" => 3,
-                "plugin-error" | "plugin-protocol-mismatch" => 4,
+                "plugin-error" | "plugin-protocol-mismatch" | "plugin-capability-missing" => 4,
                 "bridge-unresponsive" | "command-timeout" => 5,
+                "unauthorized" => 6,
                 _ => 1,
             },
             _ => 1,
@@ -85,14 +95,18 @@ impl AppError {
             AppError::StudioAmbiguous { .. } => "studio-ambiguous",
             AppError::PluginError(_) => "plugin-error",
             AppError::PluginProtocolMismatch { .. } => "plugin-protocol-mismatch",
+            AppError::PluginCapabilityMissing { .. } => "plugin-capability-missing",
             AppError::CommandTimeout { .. } => "command-timeout",
             AppError::BridgeResponse { code, .. } => match code.as_str() {
                 "bridge-unreachable" => "bridge-unreachable",
                 "studio-not-found" => "studio-not-found",
                 "studio-ambiguous" => "studio-ambiguous",
                 "plugin-error" => "plugin-error",
+                "plugin-protocol-mismatch" => "plugin-protocol-mismatch",
+                "plugin-capability-missing" => "plugin-capability-missing",
                 "bridge-unresponsive" => "bridge-unresponsive",
                 "command-timeout" => "command-timeout",
+                "unauthorized" => "unauthorized",
                 _ => "internal",
             },
             AppError::Serde(_) => "bad-json",
@@ -136,5 +150,13 @@ mod tests {
             code: "command-timeout".into(),
         };
         assert_eq!(err.exit_code(), 5);
+
+        let err = AppError::BridgeResponse {
+            operation: "bridge status".into(),
+            error: "bad token".into(),
+            code: "unauthorized".into(),
+        };
+        assert_eq!(err.exit_code(), 6);
+        assert_eq!(err.bridge_code(), "unauthorized");
     }
 }

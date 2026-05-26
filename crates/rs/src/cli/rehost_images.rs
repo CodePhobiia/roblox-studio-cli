@@ -29,6 +29,7 @@ pub struct ImageRehostReport {
     pub dry_run: bool,
     pub planned_asset_ids: Vec<String>,
     pub mappings: Vec<ImageRehostMapping>,
+    pub manifest: Vec<ImageRehostManifestEntry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,12 +39,37 @@ pub struct ImageRehostMapping {
     pub source_uri: String,
     pub target_uri: String,
     pub property_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageRehostManifestEntry {
+    pub source_asset_id: String,
+    pub source_uri: String,
+    pub class_name: String,
+    pub property: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct ImageRefSummary {
     source_uri: String,
     property_count: usize,
+    manifest: Vec<ImageRehostManifestEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +91,7 @@ pub fn rehost_image_refs_in_blob(
     blob: &mut Value,
     options: &ImageRehostOptions,
 ) -> AppResult<ImageRehostReport> {
-    let refs = collect_image_refs(blob);
+    let mut refs = collect_image_refs(blob);
     let planned_asset_ids = refs.keys().cloned().collect::<Vec<_>>();
     let scanned_image_properties = refs.values().map(|item| item.property_count).sum();
     if refs.is_empty() || options.dry_run {
@@ -77,6 +103,7 @@ pub fn rehost_image_refs_in_blob(
             dry_run: options.dry_run,
             planned_asset_ids,
             mappings: Vec::new(),
+            manifest: rehost_manifest_entries(&refs),
         });
     }
 
@@ -91,8 +118,15 @@ pub fn rehost_image_refs_in_blob(
         println!("Rehosting {} image asset(s)...", refs.len());
     }
 
-    for (source_asset_id, summary) in &refs {
-        let downloaded = download_image_asset(&client, source_asset_id, &auth.source_api_key)?;
+    for source_asset_id in refs.keys().cloned().collect::<Vec<_>>() {
+        let summary = refs.get(&source_asset_id).ok_or_else(|| {
+            AppError::Other(format!(
+                "internal rehost state missing asset {source_asset_id}"
+            ))
+        })?;
+        let source_uri = summary.source_uri.clone();
+        let property_count = summary.property_count;
+        let downloaded = download_image_asset(&client, &source_asset_id, &auth.source_api_key)?;
         let target_name = format!("rs-rehost-{source_asset_id}");
         let filename = format!(
             "rs-rehost-{}.{}",
@@ -115,15 +149,29 @@ pub fn rehost_image_refs_in_blob(
                 "rehosted image {source_asset_id} but upload returned no target asset URI"
             ))
         })?;
+        let operation_id = upload.operation_id().map(ToOwned::to_owned);
+        let operation_status = upload.operation_status();
         uri_mapping.insert(source_asset_id.clone(), target_uri.to_string());
         mappings.push(ImageRehostMapping {
             source_asset_id: source_asset_id.clone(),
-            source_uri: summary.source_uri.clone(),
+            source_uri: source_uri.clone(),
             target_uri: target_uri.to_string(),
-            property_count: summary.property_count,
+            property_count,
+            operation_id: operation_id.clone(),
+            operation_status: operation_status.clone(),
+            failure_reason: None,
         });
+        if let Some(summary) = refs.get_mut(&source_asset_id) {
+            for entry in &mut summary.manifest {
+                entry.target_uri = Some(target_uri.to_string());
+                entry.operation_id = operation_id.clone();
+                entry.status = operation_status
+                    .clone()
+                    .unwrap_or_else(|| "rehosted".into());
+            }
+        }
         if !options.quiet {
-            println!("  - {} -> {}", summary.source_uri, target_uri);
+            println!("  - {} -> {}", source_uri, target_uri);
         }
     }
 
@@ -136,6 +184,7 @@ pub fn rehost_image_refs_in_blob(
         dry_run: false,
         planned_asset_ids,
         mappings,
+        manifest: rehost_manifest_entries(&refs),
     })
 }
 
@@ -205,8 +254,9 @@ fn collect_image_refs(blob: &Value) -> BTreeMap<String, ImageRefSummary> {
     let Some(instances) = blob.get("instances").and_then(Value::as_object) else {
         return refs;
     };
+    let paths = build_instance_paths(instances);
 
-    for spec in instances.values() {
+    for (local_id, spec) in instances {
         let class_name = spec
             .get("className")
             .and_then(Value::as_str)
@@ -224,15 +274,92 @@ fn collect_image_refs(blob: &Value) -> BTreeMap<String, ImageRefSummary> {
             let Some(asset_id) = extract_asset_id(uri) else {
                 continue;
             };
+            let path = spec
+                .get("fullPath")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .or_else(|| paths.get(local_id).cloned());
+            let manifest_entry = ImageRehostManifestEntry {
+                source_asset_id: asset_id.clone(),
+                source_uri: uri.to_string(),
+                class_name: class_name.to_string(),
+                property: property.to_string(),
+                path,
+                target_uri: None,
+                operation_id: None,
+                status: "planned".into(),
+                failure_reason: None,
+            };
             refs.entry(asset_id)
-                .and_modify(|entry| entry.property_count += 1)
+                .and_modify(|entry| {
+                    entry.property_count += 1;
+                    entry.manifest.push(manifest_entry.clone());
+                })
                 .or_insert_with(|| ImageRefSummary {
                     source_uri: uri.to_string(),
                     property_count: 1,
+                    manifest: vec![manifest_entry],
                 });
         }
     }
     refs
+}
+
+fn rehost_manifest_entries(
+    refs: &BTreeMap<String, ImageRefSummary>,
+) -> Vec<ImageRehostManifestEntry> {
+    refs.values()
+        .flat_map(|summary| summary.manifest.clone())
+        .collect()
+}
+
+fn build_instance_paths(instances: &serde_json::Map<String, Value>) -> BTreeMap<String, String> {
+    let mut cache = BTreeMap::new();
+    for id in instances.keys() {
+        let mut visiting = BTreeSet::new();
+        let path = instance_path(id, instances, &mut cache, &mut visiting);
+        cache.insert(id.clone(), path);
+    }
+    cache
+}
+
+fn instance_path(
+    id: &str,
+    instances: &serde_json::Map<String, Value>,
+    cache: &mut BTreeMap<String, String>,
+    visiting: &mut BTreeSet<String>,
+) -> String {
+    if let Some(path) = cache.get(id) {
+        return path.clone();
+    }
+    if !visiting.insert(id.to_string()) {
+        return id.to_string();
+    }
+    let Some(spec) = instances.get(id) else {
+        return id.to_string();
+    };
+    let name = spec
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get("Name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(id);
+    let path = spec
+        .get("parent")
+        .and_then(Value::as_str)
+        .filter(|parent_id| instances.contains_key(*parent_id))
+        .map(|parent_id| {
+            format!(
+                "{}.{}",
+                instance_path(parent_id, instances, cache, visiting),
+                name
+            )
+        })
+        .unwrap_or_else(|| name.to_string());
+    visiting.remove(id);
+    cache.insert(id.to_string(), path.clone());
+    path
 }
 
 fn apply_rehost_mapping(blob: &mut Value, uri_mapping: &BTreeMap<String, String>) -> usize {
@@ -278,6 +405,9 @@ fn is_image_asset_property(class_name: &str, property: &str) -> bool {
         ),
         "TextureID" | "TextureId" => matches!(class_name, "MeshPart" | "SpecialMesh"),
         "BottomImage" | "MidImage" | "TopImage" => class_name == "ScrollingFrame",
+        "ColorMap" | "MetalnessMap" | "NormalMap" | "RoughnessMap" => {
+            class_name == "SurfaceAppearance"
+        }
         _ => false,
     }
 }
@@ -444,9 +574,20 @@ mod tests {
                 },
                 "i2": {
                     "className": "ScrollingFrame",
+                    "parent": "i0",
                     "properties": {
+                        "Name": "Scroller",
                         "BottomImage": "https://www.roblox.com/asset/?id=222",
                         "ScrollBarImageColor3": ["Color3", 1.0, 1.0, 1.0]
+                    }
+                },
+                "i4": {
+                    "className": "SurfaceAppearance",
+                    "parent": "i0",
+                    "properties": {
+                        "Name": "Surface",
+                        "ColorMap": "rbxassetid://333",
+                        "NormalMap": "rbxasset://textures/not-cloud.png"
                     }
                 },
                 "i3": {
@@ -456,18 +597,26 @@ mod tests {
             }
         });
         let refs = collect_image_refs(&blob);
-        assert_eq!(refs.len(), 2);
+        assert_eq!(refs.len(), 3);
         assert!(refs.contains_key("111"));
         assert!(refs.contains_key("222"));
+        assert!(refs.contains_key("333"));
+        assert_eq!(refs["333"].manifest[0].class_name, "SurfaceAppearance");
+        assert_eq!(refs["333"].manifest[0].property, "ColorMap");
+        assert_eq!(
+            refs["333"].manifest[0].path.as_deref(),
+            Some("Shop.Surface")
+        );
 
         let rewritten = apply_rehost_mapping(
             &mut blob,
             &BTreeMap::from([
                 ("111".to_string(), "rbxassetid://9001".to_string()),
                 ("222".to_string(), "rbxassetid://9002".to_string()),
+                ("333".to_string(), "rbxassetid://9003".to_string()),
             ]),
         );
-        assert_eq!(rewritten, 2);
+        assert_eq!(rewritten, 3);
         assert_eq!(
             blob["instances"]["i1"]["properties"]["Image"],
             "rbxassetid://9001"
@@ -475,6 +624,10 @@ mod tests {
         assert_eq!(
             blob["instances"]["i2"]["properties"]["BottomImage"],
             "rbxassetid://9002"
+        );
+        assert_eq!(
+            blob["instances"]["i4"]["properties"]["ColorMap"],
+            "rbxassetid://9003"
         );
         assert_eq!(
             blob["instances"]["i3"]["properties"]["Text"],

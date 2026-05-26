@@ -127,6 +127,16 @@ local function render()
         table.insert(lines, "")
         table.insert(lines, "Prompt")
         table.insert(lines, valueOrDash(latestRun.prompt))
+        if latestRun.planHash or latestRun.previewIntegrityStatus or latestRun.alphaPacketStatus or latestRun.applyCommand then
+            table.insert(lines, "")
+            table.insert(lines, "Gate proof")
+            table.insert(lines, "  Plan hash: " .. valueOrDash(latestRun.planHash))
+            table.insert(lines, "  Preview integrity: " .. valueOrDash(latestRun.previewIntegrityStatus))
+            table.insert(lines, "  Alpha packet: " .. valueOrDash(latestRun.alphaPacketStatus))
+            if latestRun.applyCommand then
+                table.insert(lines, "  Apply: " .. tostring(latestRun.applyCommand))
+            end
+        end
         appendCounts(lines, latestRun.operationCounts)
         if latestRun.companionStatus or latestRun.reviewPackStatus or latestRun.arcStatus or latestRun.bestFriendStatus or latestRun.bestFriendPilotStatus or latestRun.bestFriendRunnerStatus then
             table.insert(lines, "")

@@ -1,9 +1,15 @@
 use crate::error::AppResult;
 use crate::protocol::messages::{
-    RepairToolRequest, RepairToolResponse, ValidateRequest, ValidateResponse,
+    Diagnostic, RepairToolRequest, RepairToolResponse, ValidateRequest, ValidateResponse,
 };
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::io::Write;
+
+const FIX_TOOL_REMOVE_BROKEN_JOINTS: &str = "fix.tool.remove-broken-joints";
+const FIX_TOOL_SET_PART_PHYSICS: &str = "fix.tool.set-part-physics";
+const FIX_TOOL_UNANCHOR_PARTS: &str = "fix.tool.unanchor-parts";
+const FIX_TOOL_WELD_DISCONNECTED_PARTS: &str = "fix.tool.weld-disconnected-parts";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,11 +29,8 @@ pub fn run(
 ) -> AppResult<()> {
     let response = validate_once(port, studio.clone(), path.clone(), rules.clone())?;
     if fix {
-        let needs_repair = response
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.fix_id.as_deref() == Some("repair-tool"));
-        let repair = if needs_repair {
+        let fix_ids = applicable_validate_fix_ids(&response);
+        let repair = if !fix_ids.is_empty() {
             Some(crate::cli::request::post::<_, RepairToolResponse>(
                 port,
                 "repair-tool",
@@ -37,9 +40,14 @@ pub fn run(
                     path: path.clone(),
                     handle: None,
                     dry_run: false,
-                    replace_broken: true,
-                    physics_fix: true,
-                    collision: Some(false),
+                    replace_broken: fix_ids.iter().any(|id| id == FIX_TOOL_REMOVE_BROKEN_JOINTS),
+                    physics_fix: fix_ids
+                        .iter()
+                        .any(|id| id == FIX_TOOL_SET_PART_PHYSICS || id == FIX_TOOL_UNANCHOR_PARTS),
+                    collision: fix_ids
+                        .iter()
+                        .any(|id| id == FIX_TOOL_SET_PART_PHYSICS)
+                        .then_some(false),
                     massless: None,
                 },
                 75,
@@ -61,12 +69,20 @@ pub fn run(
             println!("Before:");
             print_response(&response);
             match &repair {
-                Some(repair) => println!(
-                    "Applied repair-tool: {} weld(s), {} physics change(s), {} broken joint(s)",
-                    repair.welds_created,
-                    repair.physics_properties_changed,
-                    repair.broken_joints_found
-                ),
+                Some(repair) => {
+                    let fix_summary = if repair.fix_ids.is_empty() {
+                        "none reported".to_string()
+                    } else {
+                        repair.fix_ids.join(",")
+                    };
+                    println!(
+                        "Applied repair-tool fixes [{}]: {} weld(s), {} physics change(s), {} broken joint(s)",
+                        fix_summary,
+                        repair.welds_created,
+                        repair.physics_properties_changed,
+                        repair.broken_joints_found
+                    );
+                }
                 None => println!("No safe fixes were applicable."),
             }
             println!("After:");
@@ -106,18 +122,7 @@ fn validate_once(
 
 fn print_response(response: &ValidateResponse) {
     for diagnostic in &response.diagnostics {
-        let property = diagnostic
-            .property
-            .as_ref()
-            .map(|value| format!(" {value}"))
-            .unwrap_or_default();
-        println!(
-            "{}  {}{} {}",
-            diagnostic.severity.to_ascii_uppercase(),
-            diagnostic.path,
-            property,
-            diagnostic.message
-        );
+        println!("{}", diagnostic_line(diagnostic));
     }
     if !response.warnings.is_empty() {
         println!("Warnings ({}):", response.warnings.len());
@@ -129,4 +134,102 @@ fn print_response(response: &ValidateResponse) {
         "{} fail, {} warn, {} info",
         response.summary.fail, response.summary.warn, response.summary.info
     );
+}
+
+fn diagnostic_line(diagnostic: &Diagnostic) -> String {
+    let property = diagnostic
+        .property
+        .as_ref()
+        .map(|value| format!(" {value}"))
+        .unwrap_or_default();
+    let fix = diagnostic
+        .fix_id
+        .as_ref()
+        .map(|value| format!(" fix:{value}"))
+        .unwrap_or_default();
+    format!(
+        "{}  [{}{}] {}{} {}",
+        diagnostic.severity.to_ascii_uppercase(),
+        diagnostic.rule,
+        fix,
+        diagnostic.path,
+        property,
+        diagnostic.message
+    )
+}
+
+fn applicable_validate_fix_ids(response: &ValidateResponse) -> Vec<String> {
+    response
+        .diagnostics
+        .iter()
+        .filter_map(|diagnostic| diagnostic.fix_id.as_deref())
+        .filter(|fix_id| is_safe_validate_fix_id(fix_id))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn is_safe_validate_fix_id(fix_id: &str) -> bool {
+    matches!(
+        fix_id,
+        FIX_TOOL_REMOVE_BROKEN_JOINTS
+            | FIX_TOOL_SET_PART_PHYSICS
+            | FIX_TOOL_UNANCHOR_PARTS
+            | FIX_TOOL_WELD_DISCONNECTED_PARTS
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::messages::{ValidateResponse, ValidationSummary};
+
+    #[test]
+    fn diagnostic_contract_validate_text_output_includes_rule_and_fix_ids() {
+        let diagnostic = Diagnostic {
+            severity: "fail".to_string(),
+            rule: "tool.part.disconnected".to_string(),
+            path: "Workspace.Tool.Part".to_string(),
+            property: None,
+            message: "BasePart is not rigidly connected to Handle".to_string(),
+            fix_id: Some("fix.tool.weld-disconnected-parts".to_string()),
+        };
+
+        let line = diagnostic_line(&diagnostic);
+        assert!(line.contains("[tool.part.disconnected fix:fix.tool.weld-disconnected-parts]"));
+        assert!(line.contains("Workspace.Tool.Part"));
+    }
+
+    #[test]
+    fn diagnostic_contract_validate_fix_filters_legacy_and_non_fixable_ids() {
+        let response = ValidateResponse {
+            path: "Workspace.Tool".to_string(),
+            summary: ValidationSummary::default(),
+            diagnostics: vec![
+                Diagnostic {
+                    severity: "fail".to_string(),
+                    rule: "tool.handle.missing".to_string(),
+                    path: "Workspace.Tool".to_string(),
+                    property: Some("Handle".to_string()),
+                    message: "Tool requires a BasePart child named Handle".to_string(),
+                    fix_id: Some("repair-tool".to_string()),
+                },
+                Diagnostic {
+                    severity: "fail".to_string(),
+                    rule: "tool.part.disconnected".to_string(),
+                    path: "Workspace.Tool.Part".to_string(),
+                    property: None,
+                    message: "BasePart is not rigidly connected to Handle".to_string(),
+                    fix_id: Some("fix.tool.weld-disconnected-parts".to_string()),
+                },
+            ],
+            warnings: vec![],
+        };
+
+        assert_eq!(
+            applicable_validate_fix_ids(&response),
+            vec!["fix.tool.weld-disconnected-parts".to_string()]
+        );
+    }
 }

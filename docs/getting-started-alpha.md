@@ -29,11 +29,17 @@ Create the starter shop candidate without touching Studio:
 ```powershell
 target\release\rs.exe autopilot plan "Add a starter shop with coins, two items, and server-side purchase validation" --recipe starterShop --out .rs\autopilot\runs\starter-shop-alpha --format json
 target\release\rs.exe autopilot preview --plan .rs\autopilot\runs\starter-shop-alpha\plan.json --format json
+target\release\rs.exe autopilot certify .rs\autopilot\runs\starter-shop-alpha --format json
+target\release\rs.exe autopilot review-pack .rs\autopilot\runs\starter-shop-alpha --format json
 target\release\rs.exe autopilot proof .rs\autopilot\runs\starter-shop-alpha --format json
 target\release\rs.exe autopilot approval .rs\autopilot\runs\starter-shop-alpha --format json
 ```
 
-Review `plan.json`, `preview.json`, `proof.json`, and `approval.md` before asking for live approval. These files prove only that an offline starter shop candidate exists; they do not prove it was applied, playtested, published, or production-ready.
+Review `plan.json`, `preview.json`, `certification.json`, `review-pack.md`,
+`proof.json`, and `approval.md` before asking for live approval. `approval.json`
+records the plan hash, preview integrity result, and exact apply command. These
+files prove only that an offline starter shop candidate exists; they do not
+prove it was applied, playtested, published, or production-ready.
 
 ## Demo 3: Apply Only After Approval And Close Out Honestly
 
@@ -50,6 +56,10 @@ If the gate reports the run is ready for live apply, apply the plan with validat
 ```powershell
 target\release\rs.exe autopilot apply --studio "Private Alpha Place" --plan .rs\autopilot\runs\starter-shop-alpha\plan.json --yes --validate --rollback-on-error --format json
 ```
+
+Use the exact command from `live-gate.json`. `autopilot apply` checks
+`approval.json`, `live-gate.json`, the current plan hash, preview integrity, and
+the selected flags before it contacts Studio.
 
 Record only proof that actually happened. For a real passed Play Solo check, include the observed evidence:
 

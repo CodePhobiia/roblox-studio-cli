@@ -428,6 +428,7 @@ fn deps_response_roundtrips() {
             kind: "mesh".to_string(),
             value: "rbxassetid://123".to_string(),
             flags: vec!["privateRisk".to_string()],
+            rule_ids: vec!["asset.private-risk".to_string()],
         }],
         scripts: vec!["Workspace.Tool.Script".to_string()],
         remotes: vec![],

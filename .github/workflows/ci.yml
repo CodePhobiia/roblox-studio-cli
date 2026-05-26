@@ -43,6 +43,9 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --check -p rs
 
+      - name: Run static docs and capability drift checks
+        run: cargo test -p rs plugin_static_tests
+
       - name: Run Rust tests
         run: cargo test -p rs
 

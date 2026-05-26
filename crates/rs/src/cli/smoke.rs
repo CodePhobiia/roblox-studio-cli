@@ -5,6 +5,7 @@ use crate::protocol::messages::{
     ValidateResponse,
 };
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -38,6 +39,8 @@ struct RegressionStep {
     ok: bool,
     duration_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
@@ -67,7 +70,7 @@ pub fn regression(
         smoke_tool_equip(port, studio.clone())
     });
     if upload_mock {
-        push_step(&mut steps, "upload-mock", || Ok(()));
+        push_step_with_details(&mut steps, "upload-mock", smoke_upload_mock);
     }
     let ok = steps.iter().all(|step| step.ok);
     let report = RegressionReport { ok, steps };
@@ -100,15 +103,163 @@ where
             name: name.to_string(),
             ok: true,
             duration_ms: started.elapsed().as_millis(),
+            details: None,
             error: None,
         }),
         Err(err) => steps.push(RegressionStep {
             name: name.to_string(),
             ok: false,
             duration_ms: started.elapsed().as_millis(),
+            details: None,
             error: Some(err.to_string()),
         }),
     }
+}
+
+fn push_step_with_details<F>(steps: &mut Vec<RegressionStep>, name: &str, run: F)
+where
+    F: FnOnce() -> AppResult<Value>,
+{
+    let started = Instant::now();
+    match run() {
+        Ok(details) => steps.push(RegressionStep {
+            name: name.to_string(),
+            ok: true,
+            duration_ms: started.elapsed().as_millis(),
+            details: Some(details),
+            error: None,
+        }),
+        Err(err) => steps.push(RegressionStep {
+            name: name.to_string(),
+            ok: false,
+            duration_ms: started.elapsed().as_millis(),
+            details: None,
+            error: Some(err.to_string()),
+        }),
+    }
+}
+
+fn smoke_upload_mock() -> AppResult<Value> {
+    let request = json!({
+        "assetType": "Image",
+        "displayName": "RsSmokeUploadMock",
+        "description": "mock upload request with token sk-testvalue for redaction proof",
+        "creationContext": {
+            "creator": {
+                "groupId": "123456"
+            }
+        }
+    });
+    let response = json!({
+        "path": "operations/rs-smoke-upload-mock",
+        "response": {
+            "assetId": "987654321"
+        },
+        "apiKey": "sk-testvalue"
+    });
+    let file = json!({
+        "field": "fileContent",
+        "filename": "rs-smoke-upload.png",
+        "mimeType": "image/png",
+        "bytes": 4
+    });
+    let asset_id = response
+        .get("response")
+        .and_then(|value| value.get("assetId"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::Other("upload mock response missing assetId".into()))?;
+    let redacted_request = redact_smoke_json(&request);
+    let redacted_response = redact_smoke_json(&response);
+    let serialized = serde_json::to_string(&json!({
+        "request": redacted_request,
+        "response": redacted_response,
+        "file": file
+    }))?;
+    let mut checks = Vec::new();
+    checks.push(upload_mock_check(
+        "asset-type",
+        request.get("assetType").and_then(Value::as_str) == Some("Image"),
+    ));
+    checks.push(upload_mock_check(
+        "creator-shape",
+        request
+            .get("creationContext")
+            .and_then(|value| value.get("creator"))
+            .and_then(|value| value.get("groupId"))
+            .and_then(Value::as_str)
+            == Some("123456"),
+    ));
+    checks.push(upload_mock_check(
+        "file-part-shape",
+        file.get("field").and_then(Value::as_str) == Some("fileContent")
+            && file.get("mimeType").and_then(Value::as_str) == Some("image/png"),
+    ));
+    checks.push(upload_mock_check("result-parsing", asset_id == "987654321"));
+    checks.push(upload_mock_check(
+        "redaction",
+        !serialized.contains("sk-testvalue") && serialized.contains("<redacted>"),
+    ));
+    if checks
+        .iter()
+        .any(|check| check.get("ok").and_then(Value::as_bool) != Some(true))
+    {
+        return Err(AppError::Other(
+            "upload mock request shaping or redaction check failed".into(),
+        ));
+    }
+    Ok(json!({
+        "mode": "offline",
+        "request": redacted_request,
+        "response": redacted_response,
+        "file": file,
+        "assetUri": format!("rbxassetid://{asset_id}"),
+        "checks": checks
+    }))
+}
+
+fn upload_mock_check(name: &str, ok: bool) -> Value {
+    json!({ "name": name, "ok": ok })
+}
+
+fn redact_smoke_json(value: &Value) -> Value {
+    match value {
+        Value::String(text) => {
+            if smoke_text_is_secretish(text) {
+                Value::String("<redacted>".into())
+            } else {
+                Value::String(text.clone())
+            }
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact_smoke_json).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    if smoke_key_is_secretish(key) {
+                        (key.clone(), Value::String("<redacted>".into()))
+                    } else {
+                        (key.clone(), redact_smoke_json(value))
+                    }
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn smoke_key_is_secretish(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    ["api_key", "apikey", "token", "secret", "password"]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn smoke_text_is_secretish(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("sk-")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("token")
+        || lower.contains("secret")
 }
 
 fn smoke_validate(port: u16, studio: Option<String>) -> AppResult<()> {
@@ -370,4 +521,48 @@ fn cleanup(port: u16, studio: Option<String>, name: &str) -> AppResult<()> {
         ),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regression_report_schema_is_stable_json() {
+        let report = RegressionReport {
+            ok: true,
+            steps: vec![RegressionStep {
+                name: "upload-mock".into(),
+                ok: true,
+                duration_ms: 0,
+                details: Some(json!({"mode": "offline"})),
+                error: None,
+            }],
+        };
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["steps"][0]["durationMs"], 0);
+        assert_eq!(value["steps"][0]["details"]["mode"], "offline");
+        assert!(value["steps"][0].get("duration_ms").is_none());
+    }
+
+    #[test]
+    fn upload_mock_validates_shape_and_redacts_without_network() {
+        let details = smoke_upload_mock().unwrap();
+        assert_eq!(details["mode"], "offline");
+        assert_eq!(details["request"]["assetType"], "Image");
+        assert_eq!(
+            details["request"]["creationContext"]["creator"]["groupId"],
+            "123456"
+        );
+        assert_eq!(details["assetUri"], "rbxassetid://987654321");
+        assert!(details["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|check| check["ok"] == true));
+        let serialized = serde_json::to_string(&details).unwrap();
+        assert!(!serialized.contains("sk-testvalue"));
+        assert!(serialized.contains("<redacted>"));
+    }
 }

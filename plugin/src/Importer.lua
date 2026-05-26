@@ -74,6 +74,21 @@ local function hierarchyParent(root, hierarchyPath)
     return parent
 end
 
+local function directChildWithSourceId(parent, sourceId)
+    if type(sourceId) ~= "string" or sourceId == "" then
+        return nil
+    end
+    for _, child in ipairs(parent:GetChildren()) do
+        local ok, childSourceId, managedBy = pcall(function()
+            return child:GetAttribute("rsSourceId"), child:GetAttribute("rsManagedBy")
+        end)
+        if ok and childSourceId == sourceId and managedBy == "rs" then
+            return child
+        end
+    end
+    return nil
+end
+
 local function applyMeshMetadata(part, mesh, warnings)
     if type(mesh.materialName) == "string" and mesh.materialName ~= "" then
         part:SetAttribute("rsMaterialName", mesh.materialName)
@@ -250,9 +265,14 @@ function Importer.import(payload, parent)
     end
 
     local warnings = {}
+    local sourceId = Ownership.sourceId(payload, "asset")
+    local existingRoot = directChildWithSourceId(parent, sourceId)
+    if existingRoot then
+        existingRoot:Destroy()
+    end
+
     local root = Instance.new("Model")
     root.Name = sanitize(payload.name)
-    local sourceId = Ownership.sourceId(payload, "asset")
     Ownership.stamp(root, sourceId)
 
     local parts = {}

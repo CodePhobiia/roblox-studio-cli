@@ -4551,6 +4551,7 @@ struct ReviewPackReport {
     acceptance_status: String,
     evidence_status: String,
     capsule_status: String,
+    alpha_packet: AlphaPacketCompleteness,
     decisions: Vec<ReviewDecision>,
     artifacts: BTreeMap<String, String>,
     blockers: Vec<String>,
@@ -5464,6 +5465,10 @@ struct ApprovalReport {
     plan_id: Option<String>,
     prompt: Option<String>,
     risk_level: Option<String>,
+    plan_hash: Option<String>,
+    preview_integrity_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_integrity: Option<PreviewIntegrity>,
     operation_count: usize,
     generated_files: Vec<String>,
     changed_paths: Vec<String>,
@@ -7644,6 +7649,7 @@ struct EvidenceKitReport {
     prompt: String,
     directories_created: bool,
     folders: BTreeMap<String, String>,
+    alpha_packet: AlphaPacketCompleteness,
     scenario_count: usize,
     requirements: Vec<EvidenceRequirement>,
     record_commands: Vec<String>,
@@ -7663,6 +7669,18 @@ struct EvidenceRequirement {
     expected: String,
     suggested_path: String,
     record_argument: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AlphaPacketCompleteness {
+    status: String,
+    repo_ready: bool,
+    live_ready: bool,
+    present: Vec<String>,
+    missing_repo: Vec<String>,
+    missing_live: Vec<String>,
+    summary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -8673,6 +8691,9 @@ struct LiveGateReport {
     approved: bool,
     skip_ready: bool,
     ready_ok: Option<bool>,
+    plan_hash: String,
+    approval_plan_hash: Option<String>,
+    preview_integrity_status: String,
     review_status: String,
     approval_status: String,
     privacy_status: String,
@@ -16358,6 +16379,7 @@ fn build_live_gate_report(
 ) -> AppResult<LiveGateReport> {
     let plan_path = run_dir.join("plan.json");
     let plan = read_plan(&plan_path)?;
+    let plan_hash = hash_json(&plan)?;
     let studio = options
         .studio
         .clone()
@@ -16395,6 +16417,11 @@ fn build_live_gate_report(
     write_json(approval_path.clone(), &approval)?;
     write_approval_markdown(approval_markdown_path.clone(), &approval)?;
     artifacts.extend(approval.artifacts.clone());
+    let exact_apply_command = exact_apply_command_for_plan(&plan_path, &plan);
+    let approval_apply_matches =
+        approval.apply_command.as_deref() == Some(exact_apply_command.as_str());
+    let approval_hash_matches = approval.plan_hash.as_deref() == Some(plan_hash.as_str());
+    let preview_integrity_pass = approval.preview_integrity_status == "pass";
 
     let privacy_path = run_dir.join("privacy.json");
     let privacy_markdown_path = run_dir.join("privacy.md");
@@ -16482,6 +16509,29 @@ fn build_live_gate_report(
         true,
         format!("approval status: {}", approval.status),
         vec![approval.approval_path.clone()],
+        Some(format!(
+            "rs autopilot approval {} --format json",
+            command_arg(run_dir.to_string_lossy().as_ref())
+        )),
+    ));
+    checks.push(live_gate_check(
+        "approval-binding",
+        "Approval Binding",
+        if approval_apply_matches && approval_hash_matches && preview_integrity_pass {
+            "pass"
+        } else {
+            "fail"
+        },
+        true,
+        format!(
+            "plan hash bound: {}, preview integrity: {}, exact apply command: {}",
+            approval_hash_matches, approval.preview_integrity_status, approval_apply_matches
+        ),
+        vec![
+            approval.approval_path.clone(),
+            format!("planHash={plan_hash}"),
+            exact_apply_command.clone(),
+        ],
         Some(format!(
             "rs autopilot approval {} --format json",
             command_arg(run_dir.to_string_lossy().as_ref())
@@ -16582,6 +16632,20 @@ fn build_live_gate_report(
     }
     if approval.status != "readyForApproval" {
         blockers.push(format!("approval packet is {}", approval.status));
+    }
+    if !approval_hash_matches {
+        blockers.push("approval.json planHash does not match current plan.json".into());
+    }
+    if !preview_integrity_pass {
+        blockers.push(format!(
+            "approval.json preview integrity is {}",
+            approval.preview_integrity_status
+        ));
+    }
+    if !approval_apply_matches {
+        blockers.push(
+            "approval.json applyCommand does not match the current exact apply command".into(),
+        );
     }
     if let Some(ready) = &ready {
         if !ready.ok {
@@ -16715,6 +16779,9 @@ fn build_live_gate_report(
         approved: options.approved,
         skip_ready: options.skip_ready,
         ready_ok: ready.as_ref().map(|ready| ready.ok),
+        plan_hash,
+        approval_plan_hash: approval.plan_hash,
+        preview_integrity_status: approval.preview_integrity_status,
         review_status: review.status,
         approval_status: approval.status,
         privacy_status: privacy.status,
@@ -16782,6 +16849,18 @@ fn render_live_gate_markdown(report: &LiveGateReport) -> String {
     out.push_str(&format!("- Run: `{}`\n", report.run_dir));
     out.push_str(&format!("- Approved: `{}`\n", report.approved));
     out.push_str(&format!("- Ready OK: `{:?}`\n", report.ready_ok));
+    out.push_str(&format!("- Plan hash: `{}`\n", report.plan_hash));
+    out.push_str(&format!(
+        "- Approval plan hash: `{:?}`\n",
+        report.approval_plan_hash
+    ));
+    out.push_str(&format!(
+        "- Preview integrity: `{}`\n",
+        report.preview_integrity_status
+    ));
+    if let Some(command) = &report.apply_command {
+        out.push_str(&format!("- Approved apply command: `{command}`\n"));
+    }
     out.push_str("\n## Agent Brief\n\n");
     out.push_str(&report.agent_brief);
     out.push_str("\n\n## Checks\n\n");
@@ -19369,6 +19448,132 @@ pub fn preview(options: PreviewOptions) -> AppResult<()> {
     Ok(())
 }
 
+fn enforce_approved_apply_gate(
+    options: &ApplyOptions,
+    run_dir: &Path,
+    plan: &AutopilotPlan,
+) -> AppResult<()> {
+    let approval_path = run_dir.join("approval.json");
+    let live_gate_path = run_dir.join("live-gate.json");
+    let approved_plan_path = run_dir.join("plan.json");
+    let exact_apply_command = exact_apply_command_for_plan(&approved_plan_path, plan);
+    let plan_hash = hash_json(plan)?;
+    let mut blockers = Vec::new();
+
+    let approval = if approval_path.exists() {
+        Some(read_json_file(&approval_path)?)
+    } else {
+        blockers.push(format!(
+            "approval.json is missing: {}",
+            approval_path.display()
+        ));
+        None
+    };
+    let live_gate = if live_gate_path.exists() {
+        Some(read_json_file(&live_gate_path)?)
+    } else {
+        blockers.push(format!(
+            "live-gate.json is missing: {}",
+            live_gate_path.display()
+        ));
+        None
+    };
+
+    if let Some(approval) = &approval {
+        if string_field(approval, "status").as_deref() != Some("readyForApproval") {
+            blockers.push(format!(
+                "approval.json status is {}",
+                string_field(approval, "status").unwrap_or_else(|| "<missing>".into())
+            ));
+        }
+        if string_field(approval, "planHash").as_deref() != Some(plan_hash.as_str()) {
+            blockers.push("approval.json planHash does not match current plan.json".into());
+        }
+        if string_field(approval, "previewIntegrityStatus").as_deref() != Some("pass") {
+            blockers.push(format!(
+                "approval.json previewIntegrityStatus is {}",
+                string_field(approval, "previewIntegrityStatus")
+                    .unwrap_or_else(|| "<missing>".into())
+            ));
+        }
+        if string_field(approval, "applyCommand").as_deref() != Some(exact_apply_command.as_str()) {
+            blockers.push(
+                "approval.json applyCommand does not match the exact approved apply command".into(),
+            );
+        }
+    }
+
+    if let Some(live_gate) = &live_gate {
+        if string_field(live_gate, "status").as_deref() != Some("readyToApply") {
+            blockers.push(format!(
+                "live-gate.json status is {}",
+                string_field(live_gate, "status").unwrap_or_else(|| "<missing>".into())
+            ));
+        }
+        if live_gate.get("approved").and_then(Value::as_bool) != Some(true) {
+            blockers.push("live-gate.json does not record approved=true".into());
+        }
+        if string_field(live_gate, "planHash").as_deref() != Some(plan_hash.as_str()) {
+            blockers.push("live-gate.json planHash does not match current plan.json".into());
+        }
+        if string_field(live_gate, "approvalPlanHash").as_deref() != Some(plan_hash.as_str()) {
+            blockers
+                .push("live-gate.json approvalPlanHash does not match current plan.json".into());
+        }
+        if string_field(live_gate, "previewIntegrityStatus").as_deref() != Some("pass") {
+            blockers.push(format!(
+                "live-gate.json previewIntegrityStatus is {}",
+                string_field(live_gate, "previewIntegrityStatus")
+                    .unwrap_or_else(|| "<missing>".into())
+            ));
+        }
+        if string_field(live_gate, "applyCommand").as_deref() != Some(exact_apply_command.as_str())
+        {
+            blockers.push(
+                "live-gate.json applyCommand does not match the exact approved apply command"
+                    .into(),
+            );
+        }
+    }
+
+    let expected_studio = plan.request.studio.as_deref();
+    if options.studio.as_deref().is_some() && options.studio.as_deref() != expected_studio {
+        blockers.push("apply --studio differs from the approved plan studio".into());
+    }
+    if !options.rollback_on_error {
+        blockers.push("approved apply requires --rollback-on-error".into());
+    }
+    if !options.validate {
+        blockers.push("approved apply requires --validate".into());
+    }
+    let expected_smoke = plan
+        .operations
+        .iter()
+        .find(|operation| operation.kind == "smoke")
+        .and_then(|operation| operation.suite.as_deref())
+        .map(str::to_string);
+    if options.smoke != expected_smoke {
+        blockers.push("apply --smoke differs from the approved plan smoke suite".into());
+    }
+    if options.force {
+        blockers.push("approved apply command does not include --force".into());
+    }
+    if !options.only.is_empty() || !options.exclude.is_empty() {
+        blockers.push("approved apply command does not include --only or --exclude filters".into());
+    }
+
+    blockers.sort();
+    blockers.dedup();
+    if blockers.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::Other(format!(
+            "autopilot apply requires matching approval.json and ready live-gate.json before mutation: {}",
+            blockers.join("; ")
+        )))
+    }
+}
+
 pub fn apply(options: ApplyOptions) -> AppResult<()> {
     if !options.yes {
         return Err(AppError::Other(
@@ -19408,6 +19613,7 @@ pub fn apply(options: ApplyOptions) -> AppResult<()> {
         .studio
         .clone()
         .or_else(|| plan.request.studio.clone());
+    enforce_approved_apply_gate(&options, &run_dir, &plan)?;
     let mut warnings = Vec::new();
     warnings.extend(verify_preview_integrity(&run_dir, &plan, &plan_dir)?);
     let preconditions = check_preconditions(
@@ -23503,6 +23709,13 @@ fn build_handoff_report(
 ) -> AppResult<HandoffReport> {
     let explain = build_explain_report(plan_path, plan);
     let coach = build_coach_report(run_dir, plan_path, plan);
+    let privacy_path = run_dir.join("privacy.json");
+    let privacy_markdown_path = markdown_path.is_some().then(|| run_dir.join("privacy.md"));
+    let privacy = build_privacy_report(run_dir, &privacy_path, privacy_markdown_path.as_deref())?;
+    write_json(privacy_path.clone(), &privacy)?;
+    if let Some(path) = &privacy_markdown_path {
+        write_privacy_markdown(path.clone(), &privacy)?;
+    }
     let bundle_path = run_dir.join("bundle.json");
     let bundle_created = if bundle_path.exists() {
         false
@@ -23525,6 +23738,10 @@ fn build_handoff_report(
     };
 
     let mut blockers = coach.blockers.clone();
+    blockers.extend(privacy.blockers.clone());
+    if !privacy.ok {
+        blockers.push("privacy scan is not pass".into());
+    }
     if !bundle_status.ok {
         blockers.extend(
             bundle_status
@@ -23534,6 +23751,7 @@ fn build_handoff_report(
         );
     }
     let mut warnings = coach.warnings.clone();
+    warnings.extend(privacy.warnings.clone());
     if !bundle_status.extra.is_empty() {
         warnings.push(format!(
             "bundle verification found {} extra local artifact(s) not recorded in bundle.json",
@@ -23553,6 +23771,7 @@ fn build_handoff_report(
     .to_string();
 
     let mut artifacts = coach.artifacts.clone();
+    artifacts.insert("privacy".into(), privacy.privacy_path.clone());
     artifacts.insert("bundle".into(), bundle_path.to_string_lossy().to_string());
     artifacts.insert(
         "handoffJson".into(),
@@ -35186,6 +35405,16 @@ fn build_review_pack_report(
             markdown_path.to_string_lossy().to_string(),
         );
     }
+    let alpha_packet = alpha_packet_completeness(
+        run_dir,
+        &[
+            "review-pack.json",
+            "proof.json",
+            "approval.json",
+            "privacy.json",
+            "evidence-kit.json",
+        ],
+    );
 
     blockers.extend(merge_many_sorted(vec![
         proof.blockers.clone(),
@@ -35235,8 +35464,14 @@ fn build_review_pack_report(
     }
     .to_string();
 
-    let decisions =
-        build_review_decisions(&approval, &privacy, &proof, &acceptance, evidence.as_ref());
+    let decisions = build_review_decisions(
+        &approval,
+        &privacy,
+        &proof,
+        &acceptance,
+        evidence.as_ref(),
+        &alpha_packet,
+    );
     let mut safe_to_say = merge_many_sorted(vec![
         proof.claim_ready.clone(),
         acceptance.claim_ready.clone(),
@@ -35300,6 +35535,7 @@ fn build_review_pack_report(
             .map(|report| report.status.clone())
             .unwrap_or_else(|| "missing".into()),
         capsule_status: capsule.status,
+        alpha_packet,
         decisions,
         artifacts,
         blockers,
@@ -35317,6 +35553,7 @@ fn build_review_decisions(
     proof: &ProofReport,
     acceptance: &AcceptanceReport,
     evidence: Option<&EvidenceKitReport>,
+    alpha_packet: &AlphaPacketCompleteness,
 ) -> Vec<ReviewDecision> {
     vec![
         review_decision(
@@ -35394,7 +35631,36 @@ fn build_review_decisions(
                         .and_then(|action| action.command.clone())
                 }),
         ),
+        review_decision(
+            "alpha-packet",
+            "Alpha Evidence Packet",
+            match alpha_packet.status.as_str() {
+                "complete" => "pass",
+                "needsLiveProof" => "pending",
+                _ => "missing",
+            },
+            &alpha_packet.summary,
+            None,
+            Some(format!(
+                "rs autopilot review-pack {} --format json",
+                command_arg(&alpha_packet_run_hint(approval, privacy, proof))
+            )),
+        ),
     ]
+}
+
+fn alpha_packet_run_hint(
+    approval: &ApprovalReport,
+    privacy: &PrivacyReport,
+    proof: &ProofReport,
+) -> String {
+    if !approval.run_dir.is_empty() {
+        approval.run_dir.clone()
+    } else if !privacy.run_dir.is_empty() {
+        privacy.run_dir.clone()
+    } else {
+        proof.run_dir.clone()
+    }
 }
 
 fn review_decision(
@@ -35412,6 +35678,84 @@ fn review_decision(
         summary: summary.into(),
         artifact,
         next_command,
+    }
+}
+
+fn alpha_packet_completeness(
+    run_dir: &Path,
+    optimistic_present: &[&str],
+) -> AlphaPacketCompleteness {
+    let repo_required = [
+        "plan.json",
+        "preview.json",
+        "certification.json",
+        "review-pack.json",
+        "proof.json",
+        "approval.json",
+        "privacy.json",
+        "rollback.json",
+        "rehearsal.json",
+        "closeout.json",
+        "evidence-kit.json",
+    ];
+    let live_required = [
+        "live-gate.json",
+        "apply.json",
+        "health.json",
+        "smoke-regression.json",
+        "playtest-result.json",
+        "evidence-review.json",
+    ];
+    let optimistic = optimistic_present.iter().copied().collect::<BTreeSet<_>>();
+    let mut present = Vec::new();
+    let mut missing_repo = Vec::new();
+    let mut missing_live = Vec::new();
+    for name in repo_required {
+        if run_dir.join(name).exists() || optimistic.contains(name) {
+            present.push(name.to_string());
+        } else {
+            missing_repo.push(name.to_string());
+        }
+    }
+    for name in live_required {
+        if run_dir.join(name).exists() || optimistic.contains(name) {
+            present.push(name.to_string());
+        } else {
+            missing_live.push(name.to_string());
+        }
+    }
+    let repo_ready = missing_repo.is_empty();
+    let live_ready = repo_ready && missing_live.is_empty();
+    let status = if live_ready {
+        "complete"
+    } else if repo_ready {
+        "needsLiveProof"
+    } else {
+        "incomplete"
+    }
+    .to_string();
+    let summary = if live_ready {
+        "alpha evidence packet has every tracked repo and live artifact".into()
+    } else if repo_ready {
+        format!(
+            "alpha evidence packet has repo artifacts but is missing {} live artifact(s)",
+            missing_live.len()
+        )
+    } else {
+        format!(
+            "alpha evidence packet is missing {} repo artifact(s) and {} live artifact(s)",
+            missing_repo.len(),
+            missing_live.len()
+        )
+    };
+    AlphaPacketCompleteness {
+        status,
+        repo_ready,
+        live_ready,
+        present,
+        missing_repo,
+        missing_live,
+        summary,
     }
 }
 
@@ -35624,6 +35968,7 @@ fn build_proof_report(
         "intent trace",
         "bundle verification",
         "handoff packet",
+        "alpha packet completeness",
         "apply result",
         "live readiness",
     ] {
@@ -35747,8 +36092,8 @@ fn build_proof_report(
             "judgment does not confirm rollback evidence".into()
         },
         next_command: Some(format!(
-            "rs autopilot apply --plan {} --yes --rollback-on-error --validate",
-            plan_path.to_string_lossy()
+            "rs autopilot live-gate --run-dir {} --approved --timeout 90 --format json",
+            command_arg(run_dir.to_string_lossy().as_ref())
         )),
     });
 
@@ -35936,6 +36281,9 @@ fn proof_requirement_for_gate(gate_name: &str) -> String {
         "preview integrity" => "Preview seal still matches plan and generated files.".into(),
         "bundle verification" => "Bundle hashes verify without required artifact drift.".into(),
         "handoff packet" => "Handoff packet is ready for another AI or CI job.".into(),
+        "alpha packet completeness" => {
+            "Alpha evidence packet completeness is tracked without implying live success.".into()
+        }
         "apply result" => "Live apply has succeeded before live success is claimed.".into(),
         "live readiness" => "Live readiness has been checked before mutation.".into(),
         other => format!("{other} gate has evidence."),
@@ -40909,6 +41257,32 @@ fn apply_smoke_arg_for_plan(plan: &AutopilotPlan) -> String {
         .unwrap_or_default()
 }
 
+fn exact_apply_command_for_plan(plan_path: &Path, plan: &AutopilotPlan) -> String {
+    let studio_arg = plan
+        .request
+        .studio
+        .as_deref()
+        .map(|studio| format!(" --studio {}", command_arg(studio)))
+        .unwrap_or_default();
+    let smoke_arg = apply_smoke_arg_for_plan(plan);
+    format!(
+        "rs autopilot apply{studio_arg} --plan {} --yes --rollback-on-error --validate{smoke_arg} --format json",
+        command_arg(plan_path.to_string_lossy().as_ref())
+    )
+}
+
+fn read_preview_integrity(preview_path: &Path) -> AppResult<Option<PreviewIntegrity>> {
+    let Some(preview) = read_json_if_exists(preview_path)? else {
+        return Ok(None);
+    };
+    preview
+        .get("integrity")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(AppError::from)
+}
+
 fn build_approval_report(
     run_dir: &Path,
     approval_path: &Path,
@@ -40950,6 +41324,9 @@ fn build_approval_report(
             plan_id: None,
             prompt: None,
             risk_level: None,
+            plan_hash: None,
+            preview_integrity_status: "missing".into(),
+            preview_integrity: None,
             operation_count: 0,
             generated_files: Vec::new(),
             changed_paths: Vec::new(),
@@ -40993,6 +41370,9 @@ fn build_approval_report(
             plan_id: None,
             prompt: None,
             risk_level: None,
+            plan_hash: None,
+            preview_integrity_status: "missing".into(),
+            preview_integrity: None,
             operation_count: 0,
             generated_files: Vec::new(),
             changed_paths: Vec::new(),
@@ -41026,6 +41406,8 @@ fn build_approval_report(
     }
 
     let plan = read_plan(&plan_path)?;
+    let plan_hash = hash_json(&plan)?;
+    let preview_integrity = read_preview_integrity(&preview_path)?;
     let mut blockers = Vec::new();
     let mut warnings = Vec::new();
     if let Err(err) = validate_plan(&plan) {
@@ -41034,6 +41416,21 @@ fn build_approval_report(
     if !preview_path.exists() {
         blockers.push("preview.json is missing".into());
     }
+    let preview_integrity_status = match verify_preview_integrity(run_dir, &plan, run_dir) {
+        Ok(integrity_warnings) if integrity_warnings.is_empty() => "pass".to_string(),
+        Ok(integrity_warnings) => {
+            blockers.extend(
+                integrity_warnings
+                    .iter()
+                    .map(|warning| format!("preview integrity: {warning}")),
+            );
+            "missing".to_string()
+        }
+        Err(err) => {
+            blockers.push(format!("preview integrity: {err}"));
+            "fail".to_string()
+        }
+    };
     let (ready_to_apply, safe_to_handoff) = if certification_path.exists() {
         let certification = read_json_file(&certification_path)?;
         warnings.extend(string_array_field(&certification, "warnings"));
@@ -41062,12 +41459,8 @@ fn build_approval_report(
         .as_deref()
         .map(|studio| format!(" --studio {}", command_arg(studio)))
         .unwrap_or_default();
-    let smoke_arg = apply_smoke_arg_for_plan(&plan);
     let ready_command = format!("rs autopilot ready{studio_arg} --timeout 90 --format json");
-    let apply_command = format!(
-        "rs autopilot apply{studio_arg} --plan {} --yes --rollback-on-error --validate{smoke_arg} --format json",
-        command_arg(plan_path.to_string_lossy().as_ref())
-    );
+    let apply_command = exact_apply_command_for_plan(&plan_path, &plan);
     let generated_files = generated_files_for_plan(&plan);
     let changed_paths = created_paths_for_plan(&plan);
     let approval_prompt = format!(
@@ -41140,6 +41533,9 @@ fn build_approval_report(
         plan_id: Some(plan.id.clone()),
         prompt: Some(plan.request.prompt.clone()),
         risk_level: Some(plan.risk.level.clone()),
+        plan_hash: Some(plan_hash),
+        preview_integrity_status,
+        preview_integrity,
         operation_count: plan.operations.len(),
         generated_files,
         changed_paths,
@@ -41174,6 +41570,9 @@ struct ApprovalReportInput<'a> {
     plan_id: Option<String>,
     prompt: Option<String>,
     risk_level: Option<String>,
+    plan_hash: Option<String>,
+    preview_integrity_status: String,
+    preview_integrity: Option<PreviewIntegrity>,
     operation_count: usize,
     generated_files: Vec<String>,
     changed_paths: Vec<String>,
@@ -41215,6 +41614,9 @@ fn finish_approval_report(input: ApprovalReportInput<'_>) -> AppResult<ApprovalR
         plan_id: input.plan_id,
         prompt: input.prompt,
         risk_level: input.risk_level,
+        plan_hash: input.plan_hash,
+        preview_integrity_status: input.preview_integrity_status,
+        preview_integrity: input.preview_integrity,
         operation_count: input.operation_count,
         generated_files: input.generated_files,
         changed_paths: input.changed_paths,
@@ -46257,6 +46659,18 @@ fn build_model_pack_report(
         write_delivery_markdown(path, &delivery)?;
     }
 
+    let privacy_path = options.run_dir.join("privacy.json");
+    let privacy_markdown_path = write_markdown.then(|| options.run_dir.join("privacy.md"));
+    let privacy = build_privacy_report(
+        &options.run_dir,
+        &privacy_path,
+        privacy_markdown_path.as_deref(),
+    )?;
+    write_json(privacy_path.clone(), &privacy)?;
+    if let Some(path) = privacy_markdown_path {
+        write_privacy_markdown(path, &privacy)?;
+    }
+
     let mut artifacts = navigator.artifacts.clone();
     artifacts.extend(delivery.artifacts.clone());
     artifacts.extend(collect_planner_run_artifacts(Some(&options.run_dir)));
@@ -46272,11 +46686,17 @@ fn build_model_pack_report(
     }
     artifacts.insert("navigator".into(), navigator.navigator_path.clone());
     artifacts.insert("delivery".into(), delivery.delivery_path.clone());
+    artifacts.insert("privacy".into(), privacy.privacy_path.clone());
 
     let mut blockers =
         merge_many_sorted(vec![navigator.blockers.clone(), delivery.blockers.clone()]);
+    blockers.extend(privacy.blockers.clone());
+    if !privacy.ok {
+        blockers.push("privacy scan is not pass".into());
+    }
     let mut warnings =
         merge_many_sorted(vec![navigator.warnings.clone(), delivery.warnings.clone()]);
+    warnings.extend(privacy.warnings.clone());
     let mut safe_to_say = merge_many_sorted(vec![
         navigator.safe_to_say.clone(),
         delivery.safe_to_say.clone(),
@@ -77440,13 +77860,27 @@ fn build_evidence_kit_report(
         }
     }
 
+    let privacy_path = run_dir.join("privacy.json");
+    let privacy_markdown_path = markdown_path.is_some().then(|| run_dir.join("privacy.md"));
+    let privacy = build_privacy_report(run_dir, &privacy_path, privacy_markdown_path.as_deref())?;
+    write_json(privacy_path.clone(), &privacy)?;
+    if let Some(path) = privacy_markdown_path {
+        write_privacy_markdown(path, &privacy)?;
+    }
+
     let requirements = build_evidence_requirements(&playtest, &folders);
     let record_commands = build_evidence_record_commands(run_dir, &playtest, &requirements);
+    let alpha_packet = alpha_packet_completeness(run_dir, &["evidence-kit.json"]);
     let certification = read_memory_certification(run_dir)?;
     let mut blockers = playtest.blockers.clone();
     let mut warnings = playtest.warnings.clone();
+    blockers.extend(privacy.blockers.clone());
+    warnings.extend(privacy.warnings.clone());
     if requirements.is_empty() {
         blockers.push("no playtest evidence requirements could be generated".into());
+    }
+    if !privacy.ok {
+        blockers.push("privacy scan is not pass".into());
     }
     if certification.applied != Some(true) {
         warnings.push(
@@ -77483,14 +77917,14 @@ fn build_evidence_kit_report(
     if certification.applied != Some(true) {
         next_actions.push(coach_action(
             2,
-            "Apply before collecting proof",
+            "Run approved live gate before proof",
             Some(format!(
-                "rs autopilot apply --plan {} --yes --rollback-on-error --validate",
-                plan_path.to_string_lossy()
+                "rs autopilot live-gate --run-dir {} --approved --timeout 90 --format json",
+                command_arg(run_dir.to_string_lossy().as_ref())
             )),
-            "The evidence checklist proves live behavior after the approved plan is applied.",
+            "The evidence checklist proves live behavior only after approval, live readiness, and the approved apply command.",
             true,
-            true,
+            false,
         ));
     }
     if let Some(command) = record_commands.first() {
@@ -77537,6 +77971,7 @@ fn build_evidence_kit_report(
         prompt: plan.request.prompt.clone(),
         directories_created: create_dirs,
         folders,
+        alpha_packet,
         scenario_count: playtest.scenario_count,
         requirements,
         record_commands,
@@ -82070,6 +82505,7 @@ fn build_certification_report(
     gates.push(certify_bundle_gate(run_dir)?);
     gates.push(certify_handoff_gate(run_dir)?);
     gates.push(certify_apply_gate(run_dir)?);
+    gates.push(certify_alpha_packet_gate(run_dir));
     gates.push(certify_live_readiness_gate(plan));
 
     let mut blockers = coach.blockers.clone();
@@ -82093,10 +82529,7 @@ fn build_certification_report(
     });
     let bundle_pass = gate_status(&gates, "bundle verification") == Some("pass");
     let preview_pass = gate_status(&gates, "preview safety") == Some("pass");
-    let integrity_ok = matches!(
-        gate_status(&gates, "preview integrity"),
-        Some("pass") | Some("warn")
-    );
+    let integrity_ok = gate_status(&gates, "preview integrity") == Some("pass");
     let ready_to_apply =
         blockers.is_empty() && preview_pass && integrity_ok && bundle_pass && !applied;
     let safe_to_handoff = blockers.is_empty() && bundle_pass;
@@ -82125,7 +82558,6 @@ fn build_certification_report(
             mutates_studio: false,
         });
     } else if ready_to_apply {
-        let smoke_arg = apply_smoke_arg_for_plan(plan);
         next_actions.push(CoachAction {
             priority: 1,
             title: "Check live readiness".into(),
@@ -82137,15 +82569,27 @@ fn build_certification_report(
         });
         next_actions.push(CoachAction {
             priority: 2,
-            title: "Apply with rollback and validation".into(),
+            title: "Prepare exact approval packet".into(),
             command: Some(format!(
-                "rs autopilot apply --plan {} --yes --rollback-on-error --validate{smoke_arg}",
-                plan_path.to_string_lossy()
+                "rs autopilot approval {} --format json",
+                command_arg(run_dir.to_string_lossy().as_ref())
             )),
-            reason: "Keep the certified run behind explicit approval, rollback, and validation."
+            reason: "Bind approval.json to plan hash, preview integrity, and the exact apply command before any mutation."
+                .into(),
+            requires_live_studio: false,
+            mutates_studio: false,
+        });
+        next_actions.push(CoachAction {
+            priority: 3,
+            title: "Run approved live gate".into(),
+            command: Some(format!(
+                "rs autopilot live-gate --run-dir {} --approved --timeout 90 --format json",
+                command_arg(run_dir.to_string_lossy().as_ref())
+            )),
+            reason: "Only live-gate may produce the approved apply command after creator approval and readiness."
                 .into(),
             requires_live_studio: true,
-            mutates_studio: true,
+            mutates_studio: false,
         });
     } else if applied {
         next_actions.push(CoachAction {
@@ -83813,6 +84257,40 @@ fn certify_apply_gate(run_dir: &Path) -> AppResult<CertificationGate> {
     }
 }
 
+fn certify_alpha_packet_gate(run_dir: &Path) -> CertificationGate {
+    let packet = alpha_packet_completeness(run_dir, &["certification.json"]);
+    let (status, severity) = match packet.status.as_str() {
+        "complete" => ("pass", "warning"),
+        "needsLiveProof" => ("warn", "warning"),
+        _ => ("warn", "warning"),
+    };
+    let mut evidence = Vec::new();
+    evidence.extend(
+        packet
+            .present
+            .iter()
+            .map(|name| run_dir.join(name).to_string_lossy().to_string()),
+    );
+    evidence.extend(
+        packet
+            .missing_repo
+            .iter()
+            .chain(packet.missing_live.iter())
+            .map(|name| format!("missing:{name}")),
+    );
+    CertificationGate {
+        name: "alpha packet completeness".into(),
+        status: status.into(),
+        severity: severity.into(),
+        message: packet.summary,
+        evidence,
+        next_command: Some(format!(
+            "rs autopilot review-pack {} --format json",
+            command_arg(run_dir.to_string_lossy().as_ref())
+        )),
+    }
+}
+
 fn certify_live_readiness_gate(plan: &AutopilotPlan) -> CertificationGate {
     CertificationGate {
         name: "live readiness".into(),
@@ -85027,6 +85505,31 @@ fn autopilot_review_payload(
         .map(|report| report.warnings.clone())
         .or_else(|| preview.map(|report| report.warnings.clone()))
         .unwrap_or_default();
+    let approval_value = read_json_file(&run_dir.join("approval.json")).ok();
+    let live_gate_value = read_json_file(&run_dir.join("live-gate.json")).ok();
+    let alpha_packet = alpha_packet_completeness(run_dir, &[]);
+    let preview_integrity_status = preview
+        .and_then(|report| report.integrity.as_ref().map(|_| "pass".to_string()))
+        .or_else(|| {
+            read_json_file(&run_dir.join("preview.json"))
+                .ok()
+                .map(|value| {
+                    if value.get("integrity").is_some() {
+                        "pass".to_string()
+                    } else {
+                        "missing".to_string()
+                    }
+                })
+        })
+        .unwrap_or_else(|| "missing".into());
+    let apply_command = live_gate_value
+        .as_ref()
+        .and_then(|value| string_field(value, "applyCommand"))
+        .or_else(|| {
+            approval_value
+                .as_ref()
+                .and_then(|value| string_field(value, "applyCommand"))
+        });
     json!({
         "schemaVersion": "rs.autopilot.review.v1",
         "runId": plan.id,
@@ -85035,6 +85538,12 @@ fn autopilot_review_payload(
         "studio": apply.and_then(|report| report.studio.clone()).or_else(|| plan.request.studio.clone()),
         "scope": plan.request.scope,
         "prompt": plan.request.prompt,
+        "planHash": hash_json(plan).ok(),
+        "previewIntegrityStatus": preview_integrity_status,
+        "alphaPacketStatus": alpha_packet.status,
+        "approvalStatus": approval_value.as_ref().and_then(|value| string_field(value, "status")),
+        "liveGateStatus": live_gate_value.as_ref().and_then(|value| string_field(value, "status")),
+        "applyCommand": apply_command,
         "risk": plan.risk,
         "operationCount": plan.operations.len(),
         "operationCounts": operation_counts,
@@ -85377,6 +85886,21 @@ fn build_publish_review_payload(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let live_gate = read_json_file(&run_dir.join("live-gate.json")).ok();
+    let alpha_packet = alpha_packet_completeness(run_dir, &[]);
+    let preview_integrity_status = preview
+        .map(|value| {
+            if value.get("integrity").is_some() {
+                "pass".to_string()
+            } else {
+                "missing".to_string()
+            }
+        })
+        .unwrap_or_else(|| "missing".into());
+    let apply_command = live_gate
+        .as_ref()
+        .and_then(|value| string_field(value, "applyCommand"))
+        .or_else(|| approval.and_then(|value| string_field(value, "applyCommand")));
     let mut payload = json!({
         "schemaVersion": "rs.autopilot.review.v1",
         "runId": plan.id,
@@ -85385,6 +85909,10 @@ fn build_publish_review_payload(
         "studio": plan.request.studio,
         "scope": plan.request.scope,
         "prompt": plan.request.prompt,
+        "planHash": hash_json(plan).ok(),
+        "previewIntegrityStatus": preview_integrity_status,
+        "alphaPacketStatus": alpha_packet.status,
+        "applyCommand": apply_command,
         "risk": plan.risk,
         "operationCount": plan.operations.len(),
         "operationCounts": operation_counts_for_plan(plan),
@@ -85412,6 +85940,7 @@ fn build_publish_review_payload(
         "recommendedCandidateId": companion.and_then(|value| string_field(value, "recommendedCandidateId")),
         "reviewPackStatus": review_pack.and_then(|value| string_field(value, "status")),
         "approvalStatus": approval.and_then(|value| string_field(value, "status")),
+        "liveGateStatus": live_gate.as_ref().and_then(|value| string_field(value, "status")),
         "proofStatus": proof.and_then(|value| string_field(value, "status")),
         "artifacts": artifacts,
         "source": "publish-review",
@@ -99787,10 +100316,36 @@ fn render_review_pack_markdown(report: &ReviewPackReport) -> String {
     out.push_str(&format!("- Acceptance: `{}`\n", report.acceptance_status));
     out.push_str(&format!("- Evidence: `{}`\n", report.evidence_status));
     out.push_str(&format!("- Capsule: `{}`\n", report.capsule_status));
+    out.push_str(&format!(
+        "- Alpha packet: `{}`\n",
+        report.alpha_packet.status
+    ));
 
     out.push_str("\n## Agent Brief\n\n");
     out.push_str(&report.agent_brief);
     out.push('\n');
+
+    out.push_str("\n## Alpha Packet\n\n");
+    out.push_str(&format!("- Status: `{}`\n", report.alpha_packet.status));
+    out.push_str(&format!(
+        "- Repo ready: `{}`\n",
+        report.alpha_packet.repo_ready
+    ));
+    out.push_str(&format!(
+        "- Live ready: `{}`\n",
+        report.alpha_packet.live_ready
+    ));
+    out.push_str(&format!("- Summary: {}\n", report.alpha_packet.summary));
+    if !report.alpha_packet.missing_repo.is_empty() {
+        out.push_str("- Missing repo artifacts: `");
+        out.push_str(&report.alpha_packet.missing_repo.join(", "));
+        out.push_str("`\n");
+    }
+    if !report.alpha_packet.missing_live.is_empty() {
+        out.push_str("- Missing live artifacts: `");
+        out.push_str(&report.alpha_packet.missing_live.join(", "));
+        out.push_str("`\n");
+    }
 
     if !report.decisions.is_empty() {
         out.push_str("\n## Decisions\n\n");
@@ -101514,6 +102069,13 @@ fn render_approval_markdown(report: &ApprovalReport) -> String {
         out.push_str(&format!("- Risk: `{risk}`\n"));
     }
     out.push_str(&format!("- Operations: `{}`\n", report.operation_count));
+    if let Some(plan_hash) = &report.plan_hash {
+        out.push_str(&format!("- Plan hash: `{plan_hash}`\n"));
+    }
+    out.push_str(&format!(
+        "- Preview integrity: `{}`\n",
+        report.preview_integrity_status
+    ));
     out.push_str(&format!(
         "- Ready to apply: `{:?}`\n",
         report.ready_to_apply
@@ -109526,10 +110088,28 @@ fn render_evidence_kit_markdown(report: &EvidenceKitReport) -> String {
         "- Requirements: `{}`\n",
         report.requirements.len()
     ));
+    out.push_str(&format!(
+        "- Alpha packet: `{}`\n",
+        report.alpha_packet.status
+    ));
 
     out.push_str("\n## Agent Brief\n\n");
     out.push_str(&report.agent_brief);
     out.push('\n');
+
+    out.push_str("\n## Alpha Packet\n\n");
+    out.push_str(&format!("- Status: `{}`\n", report.alpha_packet.status));
+    out.push_str(&format!("- Summary: {}\n", report.alpha_packet.summary));
+    if !report.alpha_packet.missing_repo.is_empty() {
+        out.push_str("- Missing repo artifacts: `");
+        out.push_str(&report.alpha_packet.missing_repo.join(", "));
+        out.push_str("`\n");
+    }
+    if !report.alpha_packet.missing_live.is_empty() {
+        out.push_str("- Missing live artifacts: `");
+        out.push_str(&report.alpha_packet.missing_live.join(", "));
+        out.push_str("`\n");
+    }
 
     if !report.blockers.is_empty() {
         out.push_str("\n## Blockers\n\n");
@@ -113375,9 +113955,22 @@ mod tests {
         assert_eq!(value["status"], "needsLiveReadiness");
         assert_eq!(value["approved"], true);
         assert_eq!(value["readyOk"], Value::Null);
+        assert!(value["planHash"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty()));
+        assert_eq!(value["approvalPlanHash"], value["planHash"]);
+        assert_eq!(value["previewIntegrityStatus"], "pass");
         assert_eq!(value["approvalStatus"], "readyForApproval");
         assert_eq!(value["privacyStatus"], "pass");
         assert_eq!(value["bundleOk"], true);
+        assert!(value["applyCommand"].as_str().is_some_and(|command| {
+            command.contains("autopilot apply") && command.contains("--smoke regression")
+        }));
+        assert!(value["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["id"] == "approval-binding" && check["status"] == "pass"));
         assert!(value["checks"]
             .as_array()
             .unwrap()
@@ -120165,6 +120758,8 @@ mod tests {
         assert_eq!(value["approvalStatus"], "readyForApproval");
         assert_eq!(value["privacyStatus"], "pass");
         assert_eq!(value["evidenceStatus"], "needsLiveApply");
+        assert_eq!(value["alphaPacket"]["status"], "incomplete");
+        assert_eq!(value["alphaPacket"]["repoReady"], false);
         assert!(value["artifacts"]["evidenceKit"]
             .as_str()
             .is_some_and(|path| path.ends_with("evidence-kit.json")));
@@ -120178,6 +120773,11 @@ mod tests {
             .any(
                 |decision| decision["id"] == "creator-approval" && decision["status"] == "pending"
             ));
+        assert!(value["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["id"] == "alpha-packet" && decision["status"] == "missing"));
         assert!(value["nextActions"]
             .as_array()
             .unwrap()
@@ -120187,6 +120787,7 @@ mod tests {
                 .is_some_and(|command| command.contains("autopilot review-pack"))));
         let markdown_text = std::fs::read_to_string(markdown).unwrap();
         assert!(markdown_text.contains("# Autopilot Review Pack"));
+        assert!(markdown_text.contains("## Alpha Packet"));
         assert!(markdown_text.contains("## Decisions"));
         assert!(run_dir.join("evidence-kit.json").exists());
         assert!(run_dir.join("agent-capsule.json").exists());
@@ -122039,6 +122640,11 @@ mod tests {
         assert_eq!(value["schemaVersion"], "rs.autopilot.approval.v1");
         assert_eq!(value["status"], "readyForApproval");
         assert_eq!(value["readyToApply"], true);
+        assert!(value["planHash"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty()));
+        assert_eq!(value["previewIntegrityStatus"], "pass");
+        assert!(value["previewIntegrity"].is_object());
         assert!(value["approvalPrompt"]
             .as_str()
             .is_some_and(|text| text.contains("Approve live Studio apply")));
@@ -122057,6 +122663,8 @@ mod tests {
                 .is_some_and(|text| text.contains("user has approved"))));
         let markdown_text = std::fs::read_to_string(markdown).unwrap();
         assert!(markdown_text.contains("# Autopilot Approval"));
+        assert!(markdown_text.contains("Plan hash"));
+        assert!(markdown_text.contains("Preview integrity"));
         assert!(markdown_text.contains("## Approval Prompt"));
 
         let verification =
@@ -122066,6 +122674,34 @@ mod tests {
             .extra
             .iter()
             .any(|path| path.contains("approval")));
+    }
+
+    #[test]
+    fn apply_requires_bound_approval_and_live_gate_before_bridge() {
+        let run_dir = PathBuf::from("target").join("autopilot-apply-gate-missing-test");
+        let _ = std::fs::remove_dir_all(&run_dir);
+        write_bundle_fixture(&run_dir);
+
+        let result = apply(ApplyOptions {
+            port: 7878,
+            studio: None,
+            plan: run_dir.join("plan.json"),
+            out: Some(run_dir.clone()),
+            yes: true,
+            validate: true,
+            rollback_on_error: true,
+            force: false,
+            only: Vec::new(),
+            exclude: Vec::new(),
+            smoke: None,
+            json: false,
+        });
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("matching approval.json and ready live-gate.json"));
+        assert!(err.contains("approval.json is missing"));
+        assert!(err.contains("live-gate.json is missing"));
+        assert!(!run_dir.join("preconditions-failed.json").exists());
     }
 
     #[test]
@@ -124279,6 +124915,8 @@ mod tests {
         assert_eq!(value["schemaVersion"], "rs.autopilot.evidence-kit.v1");
         assert_eq!(value["status"], "needsLiveApply");
         assert_eq!(value["directoriesCreated"], true);
+        assert_eq!(value["alphaPacket"]["status"], "incomplete");
+        assert_eq!(value["alphaPacket"]["liveReady"], false);
         assert!(value["requirements"]
             .as_array()
             .unwrap()
@@ -124303,6 +124941,7 @@ mod tests {
         assert!(run_dir.join("playtest-plan.json").exists());
         let markdown_text = std::fs::read_to_string(markdown).unwrap();
         assert!(markdown_text.contains("# Autopilot Evidence Kit"));
+        assert!(markdown_text.contains("## Alpha Packet"));
         assert!(markdown_text.contains("## Evidence Requirements"));
 
         std::fs::write(
@@ -127749,8 +128388,15 @@ mod tests {
             .iter()
             .any(|action| action["command"]
                 .as_str()
-                .is_some_and(|command| command.contains("autopilot apply")
-                    && command.contains("--smoke regression"))));
+                .is_some_and(|command| command.contains("autopilot live-gate")
+                    && command.contains("--approved"))));
+        assert!(kickoff_value["nextActions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|action| action["command"]
+                .as_str()
+                .is_none_or(|command| !command.contains("autopilot apply"))));
     }
 
     #[test]
@@ -128053,10 +128699,10 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| {
-                action["mutatesStudio"] == true
+                action["mutatesStudio"] == false
                     && action["command"]
                         .as_str()
-                        .is_some_and(|command| command.contains("autopilot apply"))
+                        .is_some_and(|command| command.contains("autopilot approval"))
             }));
         let markdown = std::fs::read_to_string(markdown_path).unwrap();
         assert!(markdown.contains("## Gates"));

@@ -1,26 +1,6 @@
 local StudioPath = require(script.Parent.Parent.StudioPath)
 local Ownership = require(script.Parent.Parent.Ownership)
-
-local ASSET_PROPERTIES = {
-    MeshPart = { MeshId = "mesh", TextureID = "image", TextureId = "image" },
-    SpecialMesh = { MeshId = "mesh", TextureId = "image", TextureID = "image" },
-    Decal = { Texture = "image" },
-    Texture = { Texture = "image" },
-    ImageLabel = { Image = "image" },
-    ImageButton = { Image = "image" },
-    ScrollingFrame = { BottomImage = "image", MidImage = "image", TopImage = "image" },
-    Sound = { SoundId = "audio" },
-    Animation = { AnimationId = "animation" },
-    ParticleEmitter = { Texture = "image" },
-    Trail = { Texture = "image" },
-    Beam = { Texture = "image" },
-    SurfaceAppearance = {
-        ColorMap = "image",
-        MetalnessMap = "image",
-        NormalMap = "image",
-        RoughnessMap = "image"
-    }
-}
+local Diagnostics = require(script.Parent.Parent.Diagnostics)
 
 local SCRIPT_CLASSES = {
     Script = true,
@@ -58,6 +38,19 @@ local function isAssetUri(value)
     return type(value) == "string" and value ~= ""
 end
 
+local function hasFallbackAsset(instance, meta)
+    if type(meta.fallbackProperties) ~= "table" then
+        return false
+    end
+    for _, property in ipairs(meta.fallbackProperties) do
+        local value = readProperty(instance, property)
+        if value ~= nil and tostring(value) ~= "" then
+            return true
+        end
+    end
+    return false
+end
+
 local function flagsFor(instance, value)
     local flags = {}
     if type(value) ~= "string" or value == "" then
@@ -73,6 +66,29 @@ local function flagsFor(instance, value)
         table.insert(flags, "largeEditableRisk")
     end
     return flags
+end
+
+local function ruleIdsFor(kind, flags)
+    local ids = {}
+    local seen = {}
+    local function add(id)
+        if not seen[id] then
+            seen[id] = true
+            table.insert(ids, id)
+        end
+    end
+    for _, flag in ipairs(flags) do
+        if flag == "missing" or flag == "empty" then
+            add(Diagnostics.missingAssetRule(kind))
+        elseif flag == "privateRisk" then
+            add("asset.private-risk")
+        elseif flag == "unowned" then
+            add("ownership.unowned")
+        elseif flag == "largeEditableRisk" then
+            add("asset.editable.large-risk")
+        end
+    end
+    return ids
 end
 
 local function depsHandler(payload)
@@ -102,18 +118,20 @@ local function depsHandler(payload)
         if instance.ClassName == "EditableImage" or instance.ClassName == "EditableMesh" then
             table.insert(warnings, "large editable asset risk: " .. instance:GetFullName())
         end
-        local props = ASSET_PROPERTIES[instance.ClassName]
+        local props = Diagnostics.assetPropertiesFor(instance)
         if props then
-            for property, kind in pairs(props) do
+            for property, meta in pairs(props) do
                 local value = readProperty(instance, property)
-                if isAssetUri(value) or property == "MeshId" or property == "SoundId" or property == "Image" or property == "AnimationId" then
+                if isAssetUri(value) or (meta.reportWhenMissing == true and not hasFallbackAsset(instance, meta)) then
+                    local flags = flagsFor(instance, value)
                     table.insert(dependencies, {
                         path = instance:GetFullName(),
                         className = instance.ClassName,
                         property = property,
-                        kind = kind,
+                        kind = meta.kind,
                         value = tostring(value or ""),
-                        flags = flagsFor(instance, value)
+                        flags = flags,
+                        ruleIds = ruleIdsFor(meta.kind, flags)
                     })
                 end
             end

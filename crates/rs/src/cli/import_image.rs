@@ -17,6 +17,7 @@ pub fn run(
     position: String,
 ) -> AppResult<()> {
     let import_name = name.unwrap_or_else(|| file_stem(&file));
+    let source_id = crate::cli::import_uploaded::stable_file_source_id("image-file", &file)?;
     let image = load_png(&file)?;
     let (ui_width, ui_height) = match size {
         Some(value) => parse_size(&value)?,
@@ -41,7 +42,7 @@ pub fn run(
             position_x,
             position_y,
             pixels_base64: encode_base64(&image.rgba),
-            source_id: None,
+            source_id: Some(source_id),
         },
         150,
     )?;

@@ -2,6 +2,13 @@
 
 All bridge endpoints use JSON.
 
+The bridge binds to `127.0.0.1`. CLI-facing routes require the local
+`x-rs-bridge-token` header. The `rs` binary supplies that header from
+`RS_BRIDGE_TOKEN`, from `RS_BRIDGE_TOKEN_FILE`, or from the default
+`.rs-bridge-token` file under the user home directory. Plugin-facing routes use
+the Studio session token returned by `/register` instead of the CLI bridge
+token.
+
 ## Plugin Endpoints
 
 | Method | Path | Purpose |
@@ -57,7 +64,28 @@ The plugin registration payload includes:
   "placeFilePath": "D:\\Snipe a Slime!\\place.rbxl",
   "protocolVersion": 5,
   "pluginVersion": "0.4.0",
-  "capabilities": ["exec", "read", "validate", "deserialize", "applyPlan", "packageUpdate", "deps", "autopilotReview"]
+  "capabilities": [
+    "exec",
+    "read",
+    "export",
+    "importAsset",
+    "importImage",
+    "importUploaded",
+    "importUiPack",
+    "importAudio",
+    "validate",
+    "repairTool",
+    "snapshot",
+    "create",
+    "upsertFiles",
+    "applyPlan",
+    "packageUpdate",
+    "history",
+    "deps",
+    "serialize",
+    "deserialize",
+    "autopilotReview"
+  ]
 }
 ```
 
