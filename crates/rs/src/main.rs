@@ -7181,6 +7181,12 @@ enum AuthProfileCommand {
         format: OutputFormat,
     },
 
+    /// Diagnose local profile credential storage.
+    Doctor {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+
     /// Remove a profile.
     Remove { name: String },
 
@@ -7433,6 +7439,9 @@ fn run() -> AppResult<()> {
                     set_default,
                 ),
                 AuthProfileCommand::List { format } => cli::auth::profile_list(format.is_json()),
+                AuthProfileCommand::Doctor { format } => {
+                    cli::auth::profile_doctor(format.is_json())
+                }
                 AuthProfileCommand::Remove { name } => cli::auth::profile_remove(name),
                 AuthProfileCommand::Default { name } => cli::auth::profile_default(name),
             },

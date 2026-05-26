@@ -15,6 +15,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod util;
+
+use util::{redact_json, redact_text, safe_join, slug};
+
 const PLAN_SCHEMA_VERSION: &str = "rs.autopilot.plan.v1";
 
 #[derive(Debug, Clone)]
@@ -110635,23 +110639,6 @@ fn now_stamp() -> String {
     format!("unix:{}", now_unix_seconds())
 }
 
-fn slug(value: &str) -> String {
-    let mut out = String::new();
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-        } else if !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    let trimmed = out.trim_matches('-');
-    if trimmed.is_empty() {
-        "run".into()
-    } else {
-        trimmed.chars().take(48).collect()
-    }
-}
-
 fn vector3(x: f64, y: f64, z: f64) -> Value {
     json!(["Vector3", x, y, z])
 }
@@ -110744,71 +110731,6 @@ fn script_file_name(name: &str, class_name: &str) -> String {
         _ => ".lua",
     };
     format!("{name}{suffix}")
-}
-
-fn safe_join(root: &Path, relative: &str) -> AppResult<PathBuf> {
-    let path = Path::new(relative);
-    if path.is_absolute() {
-        return Err(AppError::Other(format!(
-            "autopilot artifact path must be relative: {relative}"
-        )));
-    }
-    let mut out = root.to_path_buf();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => out.push(part),
-            std::path::Component::CurDir => {}
-            _ => {
-                return Err(AppError::Other(format!(
-                    "autopilot artifact path escapes run directory: {relative}"
-                )))
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn redact_json(value: &Value) -> Value {
-    match value {
-        Value::String(text) => {
-            let lower = text.to_ascii_lowercase();
-            if lower.contains("api_key")
-                || lower.contains("apikey")
-                || lower.contains("token")
-                || lower.contains("secret")
-                || lower.contains("roblox_api_key")
-            {
-                Value::String("<redacted>".into())
-            } else {
-                Value::String(text.clone())
-            }
-        }
-        Value::Array(values) => Value::Array(values.iter().map(redact_json).collect()),
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(key, value)| {
-                    let lower = key.to_ascii_lowercase();
-                    if lower.contains("api_key")
-                        || lower.contains("apikey")
-                        || lower.contains("token")
-                        || lower.contains("secret")
-                    {
-                        (key.clone(), Value::String("<redacted>".into()))
-                    } else {
-                        (key.clone(), redact_json(value))
-                    }
-                })
-                .collect(),
-        ),
-        _ => value.clone(),
-    }
-}
-
-fn redact_text(text: &str) -> String {
-    match redact_json(&Value::String(text.to_string())) {
-        Value::String(value) => value,
-        _ => "<redacted>".into(),
-    }
 }
 
 #[cfg(test)]

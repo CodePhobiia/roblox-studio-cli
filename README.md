@@ -2,6 +2,8 @@
 
 A single-binary CLI plus Luau Studio plugin for programmatic Roblox Studio control.
 
+Private alpha first run: follow the proof-bound starter shop path in [Getting Started Alpha](docs/getting-started-alpha.md).
+
 ## What It Does
 
 | Command | Purpose |
